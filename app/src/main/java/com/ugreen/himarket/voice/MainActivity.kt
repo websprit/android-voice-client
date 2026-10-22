@@ -146,6 +146,14 @@ class MainActivity : ComponentActivity() {
     private val interimSourceText = mutableStateOf("")
     private val liveSummaryRecord = mutableStateOf<LocalSummaryRecord?>(null)
 
+    private val selectedPersonaState = mutableStateOf(AI_PERSONAS.first())
+    private val aiChatSessionId = mutableStateOf<String?>(null)
+    private val aiChatMessages = mutableStateListOf<AiChatBubbleItem>()
+    private val isAiChatSending = mutableStateOf(false)
+    private val isHoldSpeaking = mutableStateOf(false)
+    private val freetalkSubtitleState = mutableStateOf(AI_PERSONAS.first().freetalkSubtitle)
+    private val freetalkStatusState = mutableStateOf("正在听")
+
     private val statusText = mutableStateOf("在线模型")
     private val sessionIdState = mutableStateOf("-")
     private val roomNameState = mutableStateOf("-")
@@ -475,6 +483,49 @@ class MainActivity : ComponentActivity() {
                         activeDialogueSpeaker.value = "phone"
                         currentScreen.value = "dialogue"
                     }
+                    "open_ai_chat_demo" -> {
+                        room?.disconnect()
+                        room = null
+                        isSessionActive.value = false
+                        val zhiqiu = AI_PERSONAS.first()
+                        selectedPersonaState.value = zhiqiu
+                        aiChatMessages.clear()
+                        aiChatMessages.addAll(
+                            listOf(
+                                AiChatBubbleItem("c1", isUser = false, text = zhiqiu.greeting),
+                                AiChatBubbleItem("c2", isUser = true, text = "最近工作有些累，我想找个人聊聊。"),
+                                AiChatBubbleItem(
+                                    "c3",
+                                    isUser = false,
+                                    text = "听起来，最近的工作让你有些疲惫。我们可以一起理理：是事情太多，还是某件事让你特别消耗？"
+                                )
+                            )
+                        )
+                        currentScreen.value = "ai_chat"
+                    }
+                    "open_ai_chat_live" -> {
+                        room?.disconnect()
+                        room = null
+                        isSessionActive.value = false
+                        val zhiqiu = AI_PERSONAS.first()
+                        selectedPersonaState.value = zhiqiu
+                        aiChatSessionId.value = null
+                        aiChatMessages.clear()
+                        aiChatMessages.add(
+                            AiChatBubbleItem("g1", isUser = false, text = zhiqiu.greeting)
+                        )
+                        currentScreen.value = "ai_chat"
+                        val userMsg = intent.getStringExtra("text") ?: "最近工作有些累，我想找个人聊聊。"
+                        sendAiChatMessageHttp(userMsg, speakReply = true)
+                    }
+                    "open_ai_freetalk" -> {
+                        val zhiqiu = AI_PERSONAS.first()
+                        selectedPersonaState.value = zhiqiu
+                        freetalkSubtitleState.value = zhiqiu.freetalkSubtitle
+                        freetalkStatusState.value = "正在听"
+                        currentScreen.value = "ai_freetalk"
+                        startRoomTaskSession(task = "cascade", scene = "ai_freetalk")
+                    }
                     "scene1_transcribe" -> {
                         sourceLangState.value = "zh"
                         currentScreen.value = "transcribe_live"
@@ -759,6 +810,17 @@ class MainActivity : ComponentActivity() {
                             appendLog("📝 总结($title): ${text.take(80)}...")
                         }
                         else -> {
+                            freetalkSubtitleState.value = text
+                            freetalkStatusState.value = "正在听"
+                            if (activeSceneState.value == "ai_freetalk" && isFinal && text.isNotBlank()) {
+                                aiChatMessages.add(
+                                    AiChatBubbleItem(
+                                        id = "ft_${turnId}_${System.currentTimeMillis()}",
+                                        isUser = false,
+                                        text = text
+                                    )
+                                )
+                            }
                             appendLog("🤖 AI: $text")
                         }
                     }
@@ -1225,6 +1287,10 @@ class MainActivity : ComponentActivity() {
                 put("llm_model", "deepseek-v4.1-flash:1017-cloud")
                 put("stt_model", "faster-whisper-local")
                 put("tts_voice", "piper-local-zh")
+                if (scene == "ai_freetalk") {
+                    put("system_prompt", selectedPersonaState.value.systemPrompt)
+                    put("greeting_text", selectedPersonaState.value.freetalkSubtitle)
+                }
             }.toString()
         } else {
             val srcLang = when (scene) {
@@ -1259,6 +1325,103 @@ class MainActivity : ComponentActivity() {
         return json.getJSONObject("data")
     }
 
+    private fun openAiChatScreen(speakGreeting: Boolean = true) {
+        val persona = selectedPersonaState.value
+        if (aiChatMessages.isEmpty()) {
+            aiChatMessages.add(
+                AiChatBubbleItem(
+                    id = "greet_${persona.id}",
+                    isUser = false,
+                    text = persona.greeting,
+                )
+            )
+            if (speakGreeting) {
+                runHttpSpeakAndPlay(persona.greeting, "zh")
+            }
+        }
+        currentScreen.value = "ai_chat"
+    }
+
+    private fun switchAiPersona(persona: AiPersona) {
+        selectedPersonaState.value = persona
+        aiChatSessionId.value = null
+        aiChatMessages.clear()
+        aiChatMessages.add(
+            AiChatBubbleItem(
+                id = "greet_${persona.id}_${System.currentTimeMillis()}",
+                isUser = false,
+                text = persona.greeting,
+            )
+        )
+        freetalkSubtitleState.value = persona.freetalkSubtitle
+        runHttpSpeakAndPlay(persona.greeting, "zh")
+    }
+
+    private fun sendAiChatMessageHttp(userText: String, speakReply: Boolean = true) {
+        val trimmed = userText.trim()
+        if (trimmed.isEmpty()) return
+        val persona = selectedPersonaState.value
+        aiChatMessages.add(
+            AiChatBubbleItem(
+                id = "usr_${UUID.randomUUID().toString().take(8)}",
+                isUser = true,
+                text = trimmed,
+            )
+        )
+        isAiChatSending.value = true
+        lifecycleScope.launch {
+            try {
+                val data = withContext(Dispatchers.IO) {
+                    val conn = URL("http://127.0.0.1:8080/api/v1/voice/chat")
+                        .openConnection() as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 30000
+                    conn.doOutput = true
+                    conn.setRequestProperty("Authorization", "Bearer hm_ak_live_ugreen_2026_voice_key")
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    val req = JSONObject().apply {
+                        put("text", trimmed)
+                        put("persona_id", persona.id)
+                        put("system_prompt", persona.systemPrompt)
+                        put("client_input_id", "chat_${UUID.randomUUID().toString().take(10)}")
+                        aiChatSessionId.value?.let { put("session_id", it) }
+                    }
+                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use {
+                        it.write(req.toString())
+                    }
+                    val status = conn.responseCode
+                    val respText = (if (status in 200..299) conn.inputStream else conn.errorStream)
+                        ?.bufferedReader()?.readText().orEmpty()
+                    val json = JSONObject(respText)
+                    if (status != 200) {
+                        throw RuntimeException("${json.optString("error")}: ${json.optString("message")}")
+                    }
+                    json.getJSONObject("data")
+                }
+                val sid = data.getString("session_id")
+                val reply = data.getString("reply_text")
+                aiChatSessionId.value = sid
+                val msgId = "ai_${UUID.randomUUID().toString().take(8)}"
+                aiChatMessages.add(
+                    AiChatBubbleItem(
+                        id = msgId,
+                        isUser = false,
+                        text = reply,
+                    )
+                )
+                appendLog("🤖 ${persona.name}: $reply")
+                if (speakReply) {
+                    runHttpSpeakAndPlay(reply, "zh", cacheTurnId = msgId)
+                }
+            } catch (e: Exception) {
+                appendLog("❌ AI聊天失败: ${e.message}")
+            } finally {
+                isAiChatSending.value = false
+            }
+        }
+    }
+
     @Composable
     private fun AppRouter() {
         when (currentScreen.value) {
@@ -1268,6 +1431,50 @@ class MainActivity : ComponentActivity() {
             "detail" -> RecordingDetailScreen()
             "simultaneous" -> Scene2SimultaneousScreen()
             "dialogue" -> Scene3DialogueScreen()
+            "ai_chat" -> AiChatScreenView(
+                selectedPersona = selectedPersonaState.value,
+                onSelectPersona = { switchAiPersona(it) },
+                messages = aiChatMessages,
+                isSending = isAiChatSending.value,
+                isRecordingHold = isHoldSpeaking.value,
+                onBack = {
+                    stopMediaPlayer()
+                    currentScreen.value = "home"
+                },
+                onOpenFreeTalk = {
+                    stopMediaPlayer()
+                    freetalkSubtitleState.value = selectedPersonaState.value.freetalkSubtitle
+                    freetalkStatusState.value = "正在听"
+                    currentScreen.value = "ai_freetalk"
+                    startRoomTaskSession(task = "cascade", scene = "ai_freetalk")
+                },
+                onReplayBubble = { text ->
+                    runHttpSpeakAndPlay(text, "zh")
+                },
+                onSendMessage = { text ->
+                    sendAiChatMessageHttp(text, speakReply = true)
+                },
+                onStartHoldSpeak = {
+                    isHoldSpeaking.value = true
+                },
+                onFinishHoldSpeak = {
+                    if (isHoldSpeaking.value) {
+                        isHoldSpeaking.value = false
+                        sendAiChatMessageHttp("最近工作有些累，我想找个人聊聊。", speakReply = true)
+                    }
+                }
+            )
+            "ai_freetalk" -> AiFreeTalkScreenView(
+                persona = selectedPersonaState.value,
+                subtitleText = freetalkSubtitleState.value,
+                callStateLabel = freetalkStatusState.value,
+                onHangup = {
+                    room?.disconnect()
+                    room = null
+                    isSessionActive.value = false
+                    currentScreen.value = "ai_chat"
+                }
+            )
             else -> AiAssistantHomeScreen()
         }
     }
@@ -1375,7 +1582,34 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            Spacer(modifier = Modifier.height(22.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // S60 情绪树洞 Cards: AI聊天 (语音/文字) & AI畅聊 (实时电话)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                HomeSceneCard(
+                    title = "AI聊天",
+                    iconType = "ai_chat",
+                    modifier = Modifier.weight(1f),
+                    onClick = { openAiChatScreen(speakGreeting = true) }
+                )
+                HomeSceneCard(
+                    title = "AI畅聊",
+                    iconType = "ai_freetalk",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        stopMediaPlayer()
+                        freetalkSubtitleState.value = selectedPersonaState.value.freetalkSubtitle
+                        freetalkStatusState.value = "正在听"
+                        currentScreen.value = "ai_freetalk"
+                        startRoomTaskSession(task = "cascade", scene = "ai_freetalk")
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
 
             Text(
                 text = "录音记录",
@@ -1557,6 +1791,40 @@ class MainActivity : ComponentActivity() {
                                 topLeft = Offset(size.width * 0.70f, size.height * 0.48f),
                                 size = Size(size.width * 0.18f, size.height * 0.34f),
                                 cornerRadius = CornerRadius(3.dp.toPx()),
+                                style = stroke
+                            )
+                        }
+                        "ai_chat" -> {
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.12f, size.height * 0.16f),
+                                size = Size(size.width * 0.76f, size.height * 0.58f),
+                                cornerRadius = CornerRadius(6.dp.toPx()),
+                                style = stroke
+                            )
+                            drawCircle(
+                                color = TextPrimary,
+                                radius = 1.6.dp.toPx(),
+                                center = Offset(size.width * 0.36f, size.height * 0.45f)
+                            )
+                            drawCircle(
+                                color = TextPrimary,
+                                radius = 1.6.dp.toPx(),
+                                center = Offset(size.width * 0.64f, size.height * 0.45f)
+                            )
+                        }
+                        "ai_freetalk" -> {
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.14f, size.height * 0.22f),
+                                size = Size(size.width * 0.72f, size.height * 0.16f),
+                                cornerRadius = CornerRadius(4.dp.toPx()),
+                                style = stroke
+                            )
+                            drawCircle(
+                                color = TextPrimary,
+                                radius = size.width * 0.24f,
+                                center = Offset(size.width * 0.50f, size.height * 0.64f),
                                 style = stroke
                             )
                         }
