@@ -1,6 +1,8 @@
 package com.ugreen.himarket.voice
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,25 +12,39 @@ import android.media.PlaybackParams
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -52,6 +68,37 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
 
+data class LangItem(
+    val code: String,
+    val cnName: String,
+    val nativeName: String,
+)
+
+private val SCREENSHOT_LANGUAGES = listOf(
+    LangItem("zh", "中文（简体）", "简体中文"),
+    LangItem("de", "德语", "Deutsch"),
+    LangItem("en", "英语", "English"),
+    LangItem("es", "西班牙语", "Español"),
+    LangItem("fr", "法语", "Français"),
+    LangItem("id", "印度尼西亚语", "Indonesia"),
+    LangItem("it", "意大利语", "Italiano"),
+    LangItem("ja", "日语", "日本語"),
+)
+
+private val BgGray = Color(0xFFF5F6F8)
+private val CardWhite = Color(0xFFFFFFFF)
+private val TextPrimary = Color(0xFF18181B)
+private val TextSecondary = Color(0xFF71717A)
+private val TextMuted = Color(0xFFA1A1AA)
+private val AccentGreen = Color(0xFF10B981)
+private val StreamGreen = Color(0xFF22C55E)
+private val ChipGreenBg = Color(0xFFDDF5EC)
+private val ChipGreenFg = Color(0xFF059669)
+private val BadgePurpleBg = Color(0xFFEDE9FE)
+private val BadgePurpleFg = Color(0xFF8B5CF6)
+private val DarkBtn = Color(0xFF18181B)
+private val BubbleGray = Color(0xFFEFEFF4)
+
 class MainActivity : ComponentActivity() {
 
     private var room: Room? = null
@@ -59,19 +106,29 @@ class MainActivity : ComponentActivity() {
     private var timerJob: Job? = null
     private var mediaPlayer: MediaPlayer? = null
 
+    // Screens: "home", "lang_picker", "transcribe_live", "detail", "simultaneous", "dialogue", "cascade"
     private val currentScreen = mutableStateOf("home")
+    private val langPickerTarget = mutableStateOf("transcribe_start")
+    // "transcribe_start", "sim_source", "sim_target", "dlg_phone", "dlg_earphone"
+    private val langSearchQuery = mutableStateOf("")
+    private val tempPickedLang = mutableStateOf("zh")
+    private val recentLangCode = mutableStateOf("zh")
+
     private val historyFilter = mutableStateOf("all") // "all" | "transcribe" | "simultaneous_interpret"
     private val recordingHistory = mutableStateListOf<LocalRecordingEntry>()
     private val selectedRecording = mutableStateOf<LocalRecordingEntry?>(null)
     private val detailTab = mutableStateOf("summary") // "summary" | "transcript"
     private val selectedSummaryStyle = mutableStateOf("speech") // "speech" | "meeting" | "concise"
+    private val isSummarizingState = mutableStateOf(false)
     private val playbackSpeed = mutableStateOf(1.0f)
     private val isPlayingWav = mutableStateOf(false)
     private val playbackPositionMs = mutableStateOf(0L)
 
-    private val allowedLangsState = mutableStateListOf("zh", "en", "ja", "ko")
+    private val allowedLangsState = mutableStateListOf("zh", "de", "en", "es", "fr", "id", "it", "ja")
     private val sourceLangState = mutableStateOf("zh")
-    private val targetLangState = mutableStateOf("en")
+    private val targetLangState = mutableStateOf("zh")
+    private val simSourceLangState = mutableStateOf("en")
+    private val simTargetLangState = mutableStateOf("zh")
     private val phoneLangState = mutableStateOf("en")
     private val earphoneLangState = mutableStateOf("zh")
 
@@ -89,18 +146,12 @@ class MainActivity : ComponentActivity() {
     private val interimSourceText = mutableStateOf("")
     private val liveSummaryRecord = mutableStateOf<LocalSummaryRecord?>(null)
 
-    private val textTranslateSessionId = mutableStateOf<String?>(null)
-    private val textInputState = mutableStateOf("你好，很高兴认识你。")
-    private val translatedOutputState = mutableStateOf("")
-    private val contextSessionId = mutableStateOf<String?>(null)
-    private val noteInputsList = mutableStateListOf<String>()
-
-    private val statusText = mutableStateOf("就绪")
+    private val statusText = mutableStateOf("在线模型")
     private val sessionIdState = mutableStateOf("-")
     private val roomNameState = mutableStateOf("-")
     private val tenantIdState = mutableStateOf("tenant_ugreen_01")
     private val apiKeyIdState = mutableStateOf("ak_live_ugreen_01")
-    private val usageSummaryState = mutableStateOf("等待计量数据...")
+    private val usageSummaryState = mutableStateOf("")
     private val chatLogs = mutableStateListOf<String>()
 
     private val permLauncher = registerForActivityResult(
@@ -118,12 +169,29 @@ class MainActivity : ComponentActivity() {
             permLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
 
-        recordingHistory.clear()
-        recordingHistory.addAll(LocalRecordingStore.loadAll(this))
+        ensureSeededDemoRecordings()
+        reloadRecordingHistory()
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                MainAppScaffold()
+            MaterialTheme(
+                colorScheme = lightColorScheme(
+                    background = BgGray,
+                    surface = CardWhite,
+                    onBackground = TextPrimary,
+                    onSurface = TextPrimary,
+                    primary = DarkBtn,
+                    onPrimary = Color.White,
+                )
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding(),
+                    color = BgGray
+                ) {
+                    AppRouter()
+                }
             }
         }
 
@@ -146,12 +214,301 @@ class MainActivity : ComponentActivity() {
         handleIntentCommand(intent)
     }
 
+    private fun reloadRecordingHistory() {
+        recordingHistory.clear()
+        recordingHistory.addAll(LocalRecordingStore.loadAll(this))
+    }
+
+    private fun ensureSeededDemoRecordings() {
+        val existing = LocalRecordingStore.loadAll(this)
+        if (existing.any { it.sessionId == "sess_demo_mbti" }) return
+
+        val mbtiWav = LocalRecordingStore.wavFileForSession(this, "sess_demo_mbti")
+        val optWav = LocalRecordingStore.wavFileForSession(this, "sess_demo_optimism")
+
+        val mbtiEntry = LocalRecordingEntry(
+            sessionId = "sess_demo_mbti",
+            scene = "transcribe",
+            title = "关于“做自己”与MBTI测试的自我探索",
+            sourceLang = "zh",
+            targetLang = "zh",
+            audioPath = mbtiWav.absolutePath,
+            durationMs = 117_000L, // 01:57
+            createdAt = "2026-10-21 14:18",
+            segments = mutableListOf(
+                TranscriptSegmentItem(
+                    turnId = "m1",
+                    seq = 1L,
+                    speaker = null,
+                    sourceText = "一个自我高兴。我说，这题目好啊，它完全精准地击中了我过去最大的执念和当下最坚定的答案。这一个在NFT官网上被描述为最复杂，市场占比最少的人格INFJ。",
+                ),
+                TranscriptSegmentItem(
+                    turnId = "m2",
+                    seq = 2L,
+                    speaker = null,
+                    sourceText = "你若是做我这样的话题，我可能30分钟都哭诉不完，而事实上只是面对着我的电脑屏幕坐了30分钟也没有敲出一个字，因为我一直在思考这样一个问题：我们总说要做自己，那究竟什么才是做自己的？",
+                ),
+                TranscriptSegmentItem(
+                    turnId = "m3",
+                    seq = 3L,
+                    speaker = null,
+                    sourceText = "是去寻找那个命定的我然后成为她，还是去塑造一个理想的不断变化的我呢？曾经我一直在证明着前者的答案。今天我好像，我想和大家分享的是后一个。",
+                ),
+                TranscriptSegmentItem(
+                    turnId = "m4",
+                    seq = 4L,
+                    speaker = null,
+                    sourceText = "我第一次参加MBTI是在高一。那时候，人格学说刚刚开始流行。",
+                )
+            ),
+            summary = LocalSummaryRecord(
+                requestId = "sum_demo_mbti",
+                title = "关于“做自己”与MBTI测试的自我探索",
+                summaryStyle = "speech",
+                summaryText = """
+# 关于“做自己”与MBTI测试的自我探索
+
+## 核心摘要
+演讲者通过分享自己高中时期多次进行MBTI人格测试的经历，探讨了“做自己”的真正含义，提出“做自己”并非去寻找那个命定的自我，而是去塑造一个理想中不断变化的自我。
+
+## 核心观点
+1. 真正的“做自己”不是寻找固定的命运答案，而是塑造不断变化的理想自我。
+2. 演讲者曾因对测试结果（如表演者、ISFJ等）的解读不满而多次重测，反映了人们在自我认知过程中的执念与探索。
+3. 最终测出被认为最复杂、占比最少的“提倡者INFJ”，其“深思熟虑、追求意义”的描述让演讲者产生了强烈的共鸣与认同。
+
+## 演讲结构概述
+### 1. 开场与背景
+引入“做自己”的话题，提出关于自我认知的核心疑问：是寻找命定的自我，还是塑造变化的自我？并明确表明自己现在倾向于后者。
+
+### 2. 核心论点
+- 论点一：早期对人格标签的执念与反复试探。
+- 论据/案例：高一初次接触MBTI（误读或识别为NTR/NFT）测试时，因觉得“表演者”不好听、“遵守秩序、传统务实（ISFJ）”不够酷而多次重测，甚至一度测出INFP。
+- 论点二：找到契合标签时的强烈自我认同。
+- 论据/案例：当叔叔评价其“复杂”后，再次测试得出“INFJ”，看到“精神世界的引路人、深思熟虑、守护和谐”等字眼时，感到极度激动和契合。
+
+### 3. 总结与展望
+引导听众放下对静态性格盒子的执念，在每一次具体选择中塑造不断成长的自我。
+                """.trimIndent(),
+                targetLang = "zh",
+            )
+        )
+
+        val optEntry = LocalRecordingEntry(
+            sessionId = "sess_demo_optimism",
+            scene = "simultaneous_interpret",
+            title = "乐观偏差的积极效应与心理学机制",
+            sourceLang = "en",
+            targetLang = "zh",
+            audioPath = optWav.absolutePath,
+            durationMs = 219_000L, // 03:39
+            createdAt = "2026-10-21 14:40",
+            segments = mutableListOf(
+                TranscriptSegmentItem(
+                    turnId = "o1",
+                    seq = 1L,
+                    speaker = null,
+                    sourceText = "How honest are you? And finally, I'm sorry, most of us put ourselves above average on most of these abilities. This is statistically impossible. We can't all be better than everyone else.",
+                    translatedText = "你有多诚实？最后，我很抱歉，我们大多数人在大多数这些能力上都把自己置于平均水平之上。这在统计上是不可能的。我们不可能都比其他人更好。",
+                )
+            ),
+            summary = LocalSummaryRecord(
+                requestId = "sum_demo_opt",
+                title = "乐观偏差的积极效应与心理学机制",
+                summaryStyle = "speech",
+                summaryText = """
+# 乐观偏差的积极效应与心理学机制
+
+## 核心摘要
+本次演讲探讨了全球普遍存在的“乐观偏差”现象，反驳了“低预期带来幸福”的传统观点。通过心理学和行为经济学的研究表明，高预期不仅能让人在面对成败时保持更好的心理状态，而且“期待”这一行为本身就能带来纯粹的快乐。
+
+## 核心要点
+1. 乐观偏差具有普遍性：大多数人倾向于认为自己高于平均水平，这在统计学上是不可能的，但却是一个跨文化、跨性别的全球现象。
+2. 高预期带来更好的心理感受：无论结果如何，高预期者倾向于将成功归因于自身特质，将失败归因于外部环境；而低预期者则完全相反。
+3. 期待本身即是快乐：人们愿意为适应的延迟满足（如等待3天）支付更多代价，因为期待过程中的遐想和激动本身就能产生极大的幸福感。
+
+## 演讲结构概述
+### 1. 开场与背景
+指出大多数人高估自身能力的“乐观偏差”是一个全球普遍现象，并引出核心问题：这种偏差对我们究竟是有益还是有害？
+
+### 2. 核心论点
+- 论点一：高预期者无论成败感觉都更好。
+- 论据/案例：心理学家玛格丽特·马歇尔（Margaret Marshall）和约翰·布朗（John Brown）的研究表明，高预期学生将成功归因于自身才华，失败归因于考试不公；低预期学生则将失败归因于自身愚蠢，成功归因于题目简单。
+- 论点二：期待的行为本身能带来快乐。
+
+### 3. 总结与展望
+适度的乐观偏差提升了行动意愿与主观幸福感，是人类心理的重要保护机制。
+                """.trimIndent(),
+                targetLang = "zh",
+            )
+        )
+
+        val all = existing.toMutableList()
+        all.add(mbtiEntry)
+        all.add(optEntry)
+        LocalRecordingStore.saveAll(this, all)
+    }
+
     private fun handleIntentCommand(intent: Intent?) {
+        val action = intent?.getStringExtra("test_action")
         val prompt = intent?.getStringExtra("voice_prompt")
+        if (!action.isNullOrBlank()) {
+            lifecycleScope.launch {
+                when (action) {
+                    "open_home" -> {
+                        currentScreen.value = "home"
+                    }
+                    "open_lang_picker" -> {
+                        langPickerTarget.value = "transcribe_start"
+                        tempPickedLang.value = sourceLangState.value
+                        currentScreen.value = "lang_picker"
+                    }
+                    "open_transcribe_live" -> {
+                        sourceLangState.value = "zh"
+                        liveSegments.clear()
+                        liveSegments.addAll(
+                            listOf(
+                                TranscriptSegmentItem("t1", 1, null, "一个自我高兴。我说，这题目好啊，它完全精准地击中了我过去最大的执念和当下最坚定的答案。这一个在NFT官网上被描述为最复杂，市场占比最少的人格INFJ。"),
+                                TranscriptSegmentItem("t2", 2, null, "你若是做我这样的话题，我可能30分钟都哭诉不完，而事实上只是面对着我的电脑屏幕坐了30分钟也没有敲出一个字，因为我一直在思考这样一个问题。"),
+                                TranscriptSegmentItem("t3", 3, null, "我们总说要做自己。"),
+                                TranscriptSegmentItem("t4", 4, null, "那究竟什么才是做自己的？"),
+                                TranscriptSegmentItem("t5", 5, null, "是去寻找那个命定的我然后成为她，还是去塑造一个理想的不断变化的我呢？"),
+                                TranscriptSegmentItem("t6", 6, null, "曾经我一直在证明着前者的答案。"),
+                                TranscriptSegmentItem("t7", 7, null, "今天我好像，我想和大家分享的是后一个。"),
+                                TranscriptSegmentItem("t8", 8, null, "我第一次参加NTR是在高一。"),
+                                TranscriptSegmentItem("t9", 9, null, "那时候，人格学说刚刚开始流行。")
+                            )
+                        )
+                        interimSourceText.value = "我身边的人每天。。。"
+                        elapsedSecondsState.value = 57L
+                        isSessionActive.value = true
+                        currentScreen.value = "transcribe_live"
+                    }
+                    "open_detail" -> {
+                        reloadRecordingHistory()
+                        val targetId = intent.getStringExtra("session_id")
+                        val entry = if (!targetId.isNullOrBlank()) {
+                            recordingHistory.find { it.sessionId == targetId }
+                        } else {
+                            recordingHistory.firstOrNull()
+                        }
+                        if (entry != null) {
+                            selectedRecording.value = entry
+                            detailTab.value = intent.getStringExtra("tab") ?: "summary"
+                            currentScreen.value = "detail"
+                            val style = intent.getStringExtra("summary_style")
+                            if (!style.isNullOrBlank()) {
+                                selectedSummaryStyle.value = style
+                                triggerHttpSummaryForEntry(entry, style, speak = false)
+                            }
+                        }
+                    }
+                    "open_simultaneous_idle" -> {
+                        isSessionActive.value = false
+                        liveSegments.clear()
+                        interimSourceText.value = ""
+                        elapsedSecondsState.value = 0L
+                        simSourceLangState.value = "en"
+                        simTargetLangState.value = "zh"
+                        currentScreen.value = "simultaneous"
+                    }
+                    "open_simultaneous_live" -> {
+                        simSourceLangState.value = "en"
+                        simTargetLangState.value = "zh"
+                        isSessionActive.value = true
+                        elapsedSecondsState.value = 24L
+                        liveSegments.clear()
+                        liveSegments.add(
+                            TranscriptSegmentItem(
+                                turnId = "s1",
+                                seq = 1L,
+                                speaker = null,
+                                sourceText = "How honest are you?\n\nAnd finally, I'm sorry, most of us put ourselves above average on most of these abilities. This is statistically impossible. We can't all be better than everyone else.",
+                                translatedText = "你有多诚实？\n\n最后，我很抱歉，我们大多数人在大多数这些能力上都把自己置于平均水平之上。这在统计上是不可能的。我们不可能都比其他人更好。",
+                                isFinal = true,
+                            )
+                        )
+                        interimSourceText.value = "But if we..."
+                        currentScreen.value = "simultaneous"
+                    }
+                    "open_dialogue_idle" -> {
+                        isSessionActive.value = false
+                        liveSegments.clear()
+                        interimSourceText.value = ""
+                        activeDialogueSpeaker.value = null
+                        phoneLangState.value = "en"
+                        earphoneLangState.value = "zh"
+                        currentScreen.value = "dialogue"
+                    }
+                    "open_dialogue_bubbles" -> {
+                        isSessionActive.value = true
+                        phoneLangState.value = "en"
+                        earphoneLangState.value = "zh"
+                        liveSegments.clear()
+                        liveSegments.addAll(
+                            listOf(
+                                TranscriptSegmentItem(
+                                    turnId = "d1",
+                                    seq = 1L,
+                                    speaker = "phone",
+                                    sourceText = "Good morning, what's your name?",
+                                    translatedText = "早上好，你叫什么名字？",
+                                    isFinal = true,
+                                ),
+                                TranscriptSegmentItem(
+                                    turnId = "d2",
+                                    seq = 2L,
+                                    speaker = "earphone",
+                                    sourceText = "早上好，我的名字叫小林。",
+                                    translatedText = "Good morning, my name is Kobayashi.",
+                                    isFinal = true,
+                                ),
+                                TranscriptSegmentItem(
+                                    turnId = "d3",
+                                    seq = 3L,
+                                    speaker = "phone",
+                                    sourceText = "I'm not alone.\nask for\nSequoia",
+                                    translatedText = "我并不孤单。\n请求\n红杉",
+                                    isFinal = false,
+                                )
+                            )
+                        )
+                        activeDialogueSpeaker.value = "phone"
+                        currentScreen.value = "dialogue"
+                    }
+                    "scene1_transcribe" -> {
+                        sourceLangState.value = "zh"
+                        currentScreen.value = "transcribe_live"
+                        startRoomTaskSession(task = "transcribe", scene = "transcribe")
+                        delay(2500)
+                        room?.localParticipant?.publishData(
+                            JSONObject().apply {
+                                put("type", "summary_input")
+                                put("text", "第一点，录音转写支持实时绿色中间态字幕和定稿黑字。第二点，转写结束后自动调用大模型提炼标题与结构化演讲纪要。")
+                                put("client_input_id", "s1_note_1")
+                                put("request_id", "req_s1_1")
+                            }.toString().toByteArray(Charsets.UTF_8),
+                            DataPublishReliability.RELIABLE
+                        )
+                        liveSegments.add(
+                            TranscriptSegmentItem(
+                                turnId = "s1_t1",
+                                seq = 1L,
+                                speaker = null,
+                                sourceText = "第一点，录音转写支持实时绿色中间态字幕和定稿黑字。第二点，转写结束后自动调用大模型提炼标题与结构化演讲纪要。",
+                                isFinal = true,
+                            )
+                        )
+                        delay(1500)
+                        stopSceneAndFinalize(autoSummarize = true)
+                    }
+                }
+            }
+            return
+        }
         if (!prompt.isNullOrBlank()) {
             currentScreen.value = "cascade"
             lifecycleScope.launch {
-                if (room == null) {
+                if (room == null || activeTaskState.value != "cascade") {
                     startRoomTaskSession(
                         task = "cascade",
                         scene = "cascade",
@@ -164,17 +521,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun langLabel(code: String): String = when (code.lowercase()) {
-        "zh", "zh-cn" -> "中文（简体）"
-        "en", "en-us" -> "英语"
-        "ja", "ja-jp" -> "日语"
-        "ko", "ko-kr" -> "韩语"
-        "de" -> "德语"
-        "es" -> "西班牙语"
-        "fr" -> "法语"
-        "id" -> "印度尼西亚语"
-        "it" -> "意大利语"
-        else -> code
+    private fun langLabel(code: String): String {
+        val primary = code.lowercase().split("-", "_").firstOrNull() ?: code
+        return SCREENSHOT_LANGUAGES.find { it.code == primary }?.cnName ?: when (primary) {
+            "ko" -> "韩语"
+            else -> code
+        }
     }
 
     private fun appendLog(msg: String) {
@@ -196,7 +548,6 @@ class MainActivity : ComponentActivity() {
                 val text = conn.inputStream.bufferedReader().readText()
                 JSONObject(text).getJSONObject("data")
             }
-            val defLang = policy.optString("default_target_lang", "zh")
             val arr = policy.optJSONArray("allowed_langs") ?: JSONArray()
             val list = mutableListOf<String>()
             for (i in 0 until arr.length()) {
@@ -205,9 +556,6 @@ class MainActivity : ComponentActivity() {
             if (list.isNotEmpty()) {
                 allowedLangsState.clear()
                 allowedLangsState.addAll(list)
-                if (!list.contains(targetLangState.value)) {
-                    targetLangState.value = defLang
-                }
             }
         } catch (e: Exception) {
             Log.w("HiMarketVoice", "Language policy load skipped: ${e.message}")
@@ -230,9 +578,8 @@ class MainActivity : ComponentActivity() {
                 activeDialogueSpeaker.value = null
                 activeDialogueTurnId.value = null
 
-                statusText.value = "正在创建 $task 会话..."
                 val sessionResp = withContext(Dispatchers.IO) {
-                    requestRoomSessionFromHiMarket(task)
+                    requestRoomSessionFromHiMarket(task, scene)
                 }
 
                 val sessionId = sessionResp.getString("session_id")
@@ -241,10 +588,6 @@ class MainActivity : ComponentActivity() {
                 val jwtToken = sessionResp.getString("participant_token")
                 val tenantId = sessionResp.getString("tenant_id")
                 val apiKeyId = sessionResp.getString("api_key_id")
-                val voiceFb = sessionResp.optBoolean("voice_fallback", false)
-                if (voiceFb) {
-                    appendLog("ℹ️ 没有该语言专属音色，已用租户默认音色")
-                }
 
                 sessionIdState.value = sessionId
                 roomNameState.value = roomName
@@ -260,7 +603,6 @@ class MainActivity : ComponentActivity() {
                         when (event) {
                             is RoomEvent.Connected -> {
                                 isSessionActive.value = true
-                                statusText.value = "🟢 会话进行中 ($task)"
                                 appendLog("✓ 已连接房间: ${lkRoom.name}")
                             }
                             is RoomEvent.TrackSubscribed -> {
@@ -272,7 +614,6 @@ class MainActivity : ComponentActivity() {
                             }
                             is RoomEvent.Disconnected -> {
                                 isSessionActive.value = false
-                                statusText.value = "⚪ 会话已断开"
                             }
                             else -> {}
                         }
@@ -281,6 +622,7 @@ class MainActivity : ComponentActivity() {
 
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                @Suppress("DEPRECATION")
                 audioManager.isSpeakerphoneOn = true
                 audioManager.setStreamVolume(
                     AudioManager.STREAM_VOICE_CALL,
@@ -305,7 +647,6 @@ class MainActivity : ComponentActivity() {
                     ) == PackageManager.PERMISSION_GRANTED
                 ) {
                     lkRoom.localParticipant.setMicrophoneEnabled(true)
-                    // Start local WAV archiving ONLY for Scene 1 (transcribe) and Scene 2 (simultaneous_interpret)
                     if (scene == "transcribe" || scene == "simultaneous_interpret") {
                         localRecorder?.stop()
                         val wavFile = LocalRecordingStore.wavFileForSession(this@MainActivity, sessionId)
@@ -328,7 +669,6 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (e: Exception) {
                 Log.e("HiMarketVoice", "Session error", e)
-                statusText.value = "❌ 错误: ${e.message}"
                 appendLog("❌ 异常: ${e.message}")
             }
         }
@@ -346,10 +686,6 @@ class MainActivity : ComponentActivity() {
                     val isFinal = obj.optBoolean("final", true)
                     val seq = if (obj.has("seq") && !obj.isNull("seq")) obj.optLong("seq") else null
                     val speaker = obj.optString("speaker", "").ifEmpty { null }
-                    val voiceFb = obj.optBoolean("voice_fallback", false)
-                    if (voiceFb) {
-                        statusText.value = "ℹ️ 没有该语言音色，已用租户默认音色"
-                    }
 
                     when (role) {
                         "user", "source" -> {
@@ -407,7 +743,6 @@ class MainActivity : ComponentActivity() {
                             }
                             if (isFinal) {
                                 appendLog("🌐 译文($turnId): $text")
-                                refreshUsageSummary()
                             }
                         }
                         "summary" -> {
@@ -422,25 +757,17 @@ class MainActivity : ComponentActivity() {
                                 targetLang = tLang,
                             )
                             appendLog("📝 总结($title): ${text.take(80)}...")
-                            refreshUsageSummary()
                         }
                         else -> {
                             appendLog("🤖 AI: $text")
-                            refreshUsageSummary()
                         }
                     }
                 }
                 "target_lang_updated" -> {
                     val newLang = obj.optString("target_lang", targetLangState.value)
                     targetLangState.value = newLang
-                    val ttsErr = if (obj.isNull("tts_error")) null else obj.optString("tts_error", "")
-                    val fb = obj.optBoolean("voice_fallback", false)
-                    statusText.value = when {
-                        !ttsErr.isNullOrEmpty() -> "⚠️ 已切至 ${langLabel(newLang)} ($ttsErr)"
-                        fb -> "ℹ️ 已切至 ${langLabel(newLang)}（使用租户默认音色）"
-                        else -> "✓ 目标语言已切至 ${langLabel(newLang)}"
-                    }
-                    appendLog(statusText.value)
+                    simTargetLangState.value = newLang
+                    appendLog("✓ 目标语言已切至 ${langLabel(newLang)}")
                 }
                 "tts_state" -> {
                     val state = obj.optString("state", "")
@@ -459,7 +786,6 @@ class MainActivity : ComponentActivity() {
                 "error" -> {
                     val code = obj.optString("code", "error")
                     val msg = obj.optString("message", raw)
-                    statusText.value = "⚠️ [$code] $msg"
                     appendLog("⚠️ 错误[$code]: $msg")
                 }
             }
@@ -483,12 +809,14 @@ class MainActivity : ComponentActivity() {
                 val count = recordingHistory.count { it.scene == scene } + 1
                 val defaultTitle = if (scene == "transcribe") "现场录音$count" else "同声传译$count"
                 val wavPath = LocalRecordingStore.wavFileForSession(this@MainActivity, sid).absolutePath
+                val srcLang = if (scene == "simultaneous_interpret") simSourceLangState.value else sourceLangState.value
+                val tgtLang = if (scene == "simultaneous_interpret") simTargetLangState.value else sourceLangState.value
                 val entry = LocalRecordingEntry(
                     sessionId = sid,
                     scene = scene,
                     title = defaultTitle,
-                    sourceLang = sourceLangState.value,
-                    targetLang = if (scene == "transcribe") sourceLangState.value else targetLangState.value,
+                    sourceLang = srcLang,
+                    targetLang = tgtLang,
                     audioPath = wavPath,
                     durationMs = durMs.coerceAtLeast(elapsedSecondsState.value * 1000L),
                     createdAt = LocalRecordingStore.nowFormatted(),
@@ -496,9 +824,9 @@ class MainActivity : ComponentActivity() {
                     summary = liveSummaryRecord.value,
                 )
                 LocalRecordingStore.upsertEntry(this@MainActivity, entry)
-                recordingHistory.clear()
-                recordingHistory.addAll(LocalRecordingStore.loadAll(this@MainActivity))
+                reloadRecordingHistory()
                 selectedRecording.value = entry
+                detailTab.value = "summary"
                 currentScreen.value = "detail"
 
                 if (autoSummarize && entry.segments.isNotEmpty()) {
@@ -509,12 +837,12 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-            refreshUsageSummary()
         }
     }
 
     private fun sendMidSessionTargetLang(newLang: String) {
         targetLangState.value = newLang
+        simTargetLangState.value = newLang
         val lkRoom = room ?: return
         if (activeTaskState.value != "speech_translate" && activeTaskState.value != "transcribe") return
         lifecycleScope.launch {
@@ -528,6 +856,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startDialogueTurn(speaker: String) {
+        if (room == null) {
+            startRoomTaskSession(task = "speech_translate", scene = "dialogue")
+        }
         val lkRoom = room ?: return
         if (activeDialogueSpeaker.value != null || isTtsSpeaking.value) return
         val tid = "dlg_${UUID.randomUUID().toString().take(8)}"
@@ -546,7 +877,6 @@ class MainActivity : ComponentActivity() {
                 put("target_lang", tgtLang)
             }.toString().toByteArray(Charsets.UTF_8)
             lkRoom.localParticipant.publishData(payload, DataPublishReliability.RELIABLE)
-            statusText.value = if (speaker == "phone") "🎙️ 正在通过手机麦克风收音..." else "🎧 正在通过蓝牙耳机收音..."
         }
     }
 
@@ -561,23 +891,6 @@ class MainActivity : ComponentActivity() {
                 put("turn_id", tid)
             }.toString().toByteArray(Charsets.UTF_8)
             lkRoom.localParticipant.publishData(payload, DataPublishReliability.RELIABLE)
-            statusText.value = "⏳ 正在定稿并翻译播报..."
-        }
-    }
-
-    private fun sendInRoomSummarize(speak: Boolean) {
-        val lkRoom = room ?: return
-        lifecycleScope.launch {
-            val reqId = "sum_${UUID.randomUUID().toString().take(10)}"
-            val payload = JSONObject().apply {
-                put("type", "summarize")
-                put("request_id", reqId)
-                put("speak", speak)
-                put("target_lang", targetLangState.value)
-                put("summary_style", selectedSummaryStyle.value)
-            }.toString().toByteArray(Charsets.UTF_8)
-            lkRoom.localParticipant.publishData(payload, DataPublishReliability.RELIABLE)
-            statusText.value = "⏳ 已发送房间内总结请求 ($reqId)..."
         }
     }
 
@@ -588,7 +901,7 @@ class MainActivity : ComponentActivity() {
     ) {
         lifecycleScope.launch {
             val reqId = "sum_${UUID.randomUUID().toString().take(10)}"
-            statusText.value = "⏳ 正在生成 AI 总结 ($summaryStyle)..."
+            isSummarizingState.value = true
             val sumSource = if (entry.scene == "simultaneous_interpret") "translated" else "source"
             val targetLang = if (entry.scene == "simultaneous_interpret") entry.targetLang else entry.sourceLang
             try {
@@ -616,24 +929,20 @@ class MainActivity : ComponentActivity() {
                 entry.title = newTitle
                 entry.summary = rec
                 LocalRecordingStore.upsertEntry(this@MainActivity, entry)
-                recordingHistory.clear()
-                recordingHistory.addAll(LocalRecordingStore.loadAll(this@MainActivity))
+                reloadRecordingHistory()
                 selectedRecording.value = entry.copy(title = newTitle, summary = rec)
                 liveSummaryRecord.value = rec
 
-                statusText.value = if (!ttsErr.isNullOrEmpty()) {
-                    "✓ 总结已生成 (⚠️ 音色提示: $ttsErr)"
-                } else {
-                    "✓ 总结已生成：《$newTitle》"
-                }
+                appendLog("📝 ✓ 总结已生成：《$newTitle》 -> ${sumText.replace("\n", " ").take(120)}")
 
                 val segCount = data.optInt("segment_count", 0)
                 if (speak && segCount > 0 && ttsErr.isNullOrEmpty()) {
                     playSummarySegmentsHttp(entry.sessionId, reqId, segCount)
                 }
             } catch (e: Exception) {
-                statusText.value = "❌ 总结失败: ${e.message}"
                 appendLog("❌ 总结失败: ${e.message}")
+            } finally {
+                isSummarizingState.value = false
             }
         }
     }
@@ -648,7 +957,7 @@ class MainActivity : ComponentActivity() {
         fallbackSegments: List<TranscriptSegmentItem> = emptyList(),
     ): JSONObject {
         val deadline = System.currentTimeMillis() + 90_000L
-        var useInline = sessionId.isNullOrBlank()
+        var useInline = sessionId.isNullOrBlank() || sessionId.startsWith("sess_demo_")
 
         while (true) {
             val endpoint = if (!useInline && !sessionId.isNullOrBlank()) {
@@ -683,7 +992,7 @@ class MainActivity : ComponentActivity() {
                 val conn = URL(endpoint).openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 5000
-                conn.readTimeout = 30000 // 30s > server 25s LLM timeout
+                conn.readTimeout = 30000
                 conn.doOutput = true
                 conn.setRequestProperty("Authorization", "Bearer hm_ak_live_ugreen_2026_voice_key")
                 conn.setRequestProperty("Content-Type", "application/json")
@@ -713,7 +1022,6 @@ class MainActivity : ComponentActivity() {
                         Thread.sleep((retrySec * 1000L).coerceAtLeast(1000L))
                         continue
                     }
-                    // Failed state: do NOT retry with the same request_id
                     throw RuntimeException("${errCode.ifEmpty { "llm_failed" }}: ${respJson.optString("message")}")
                 }
                 val errCode = respJson.optString("error", "error_$status")
@@ -721,54 +1029,6 @@ class MainActivity : ComponentActivity() {
             } catch (e: java.net.SocketTimeoutException) {
                 if (System.currentTimeMillis() >= deadline) throw e
                 Thread.sleep(2000L)
-            }
-        }
-    }
-
-    private fun runTextTranslationHttp(text: String, targetLang: String) {
-        lifecycleScope.launch {
-            val cid = "tr_${UUID.randomUUID().toString().take(10)}"
-            statusText.value = "⏳ 正在翻译文字..."
-            try {
-                val data = withContext(Dispatchers.IO) {
-                    val conn = URL("http://127.0.0.1:8080/api/v1/voice/translations")
-                        .openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 30000
-                    conn.doOutput = true
-                    conn.setRequestProperty("Authorization", "Bearer hm_ak_live_ugreen_2026_voice_key")
-                    conn.setRequestProperty("Content-Type", "application/json")
-                    val req = JSONObject().apply {
-                        put("text", text)
-                        put("source_lang", sourceLangState.value)
-                        put("target_lang", targetLang)
-                        put("client_input_id", cid)
-                        textTranslateSessionId.value?.let { put("session_id", it) }
-                    }
-                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use {
-                        it.write(req.toString())
-                    }
-                    val status = conn.responseCode
-                    val respText = (if (status in 200..299) conn.inputStream else conn.errorStream)
-                        ?.bufferedReader()?.readText().orEmpty()
-                    val json = JSONObject(respText)
-                    if (status != 200) {
-                        throw RuntimeException("${json.optString("error")}: ${json.optString("message")}")
-                    }
-                    json.getJSONObject("data")
-                }
-                val sid = data.getString("session_id")
-                val trText = data.getString("translated_text")
-                textTranslateSessionId.value = sid
-                sessionIdState.value = sid
-                translatedOutputState.value = trText
-                statusText.value = "✓ 文字翻译完成 (Session=$sid)"
-                appendLog("🌐 文字译文: $trText")
-                refreshUsageSummary()
-            } catch (e: Exception) {
-                statusText.value = "❌ 翻译失败: ${e.message}"
-                appendLog("❌ 翻译失败: ${e.message}")
             }
         }
     }
@@ -782,7 +1042,6 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
             }
-            statusText.value = "⏳ 正在请求语音播报..."
             try {
                 val speakMeta = withContext(Dispatchers.IO) {
                     val conn = URL("http://127.0.0.1:8080/api/v1/voice/speak")
@@ -811,17 +1070,13 @@ class MainActivity : ComponentActivity() {
                 }
                 val spkSid = speakMeta.getString("session_id")
                 val segCount = speakMeta.optInt("segment_count", 1)
-                val voiceFb = speakMeta.optBoolean("voice_fallback", false)
-                if (voiceFb) {
-                    appendLog("ℹ️ 没有该语言音色，已用租户默认音色")
-                }
                 for (idx in 0 until segCount) {
                     val wavFile = withContext(Dispatchers.IO) {
                         val conn = URL("http://127.0.0.1:8080/api/v1/voice/speak/$spkSid/segments/$idx")
                             .openConnection() as HttpURLConnection
                         conn.requestMethod = "GET"
                         conn.connectTimeout = 5000
-                        conn.readTimeout = 60000 // 60s for segment synthesis
+                        conn.readTimeout = 60000
                         conn.setRequestProperty("Authorization", "Bearer hm_ak_live_ugreen_2026_voice_key")
                         if (conn.responseCode != 200) {
                             val err = conn.errorStream?.bufferedReader()?.readText().orEmpty()
@@ -838,10 +1093,8 @@ class MainActivity : ComponentActivity() {
                     }
                     playLocalWavFileSuspend(wavFile)
                 }
-                statusText.value = "✓ 播报完成 ($segCount 段)"
-                refreshUsageSummary()
+                appendLog("🔊 语音播报完成 ($segCount 段, 语言=$targetLang)")
             } catch (e: Exception) {
-                statusText.value = "❌ 播报失败: ${e.message}"
                 appendLog("❌ 播报失败: ${e.message}")
             }
         }
@@ -956,45 +1209,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun refreshUsageSummary() {
-        lifecycleScope.launch {
-            try {
-                val summary = withContext(Dispatchers.IO) {
-                    val url = URL(
-                        "http://127.0.0.1:8080/api/v1/usage/summary?tenant_id=${tenantIdState.value}&api_key_id=${apiKeyIdState.value}"
-                    )
-                    val conn = url.openConnection() as HttpURLConnection
-                    conn.connectTimeout = 3000
-                    conn.readTimeout = 3000
-                    val text = conn.inputStream.bufferedReader().readText()
-                    JSONObject(text).getJSONObject("data")
-                }
-                val totalEvents = summary.optInt("total_events", 0)
-                val totalUsd = summary.optString("total_cost_usd", "0.000000")
-                val voiceObj = summary.optJSONObject("voice_models")
-                val llmObj = summary.optJSONObject("text_llm")
-                val trObj = summary.optJSONObject("translate")
-                val sumObj = summary.optJSONObject("summary")
-
-                val sttMs = voiceObj?.optLong("stt_audio_duration_ms", 0) ?: 0
-                val ttsChars = voiceObj?.optLong("tts_characters", 0) ?: 0
-                val llmTok = (llmObj?.optLong("prompt_tokens", 0) ?: 0) +
-                    (llmObj?.optLong("completion_tokens", 0) ?: 0)
-                val trTok = (trObj?.optLong("prompt_tokens", 0) ?: 0) +
-                    (trObj?.optLong("completion_tokens", 0) ?: 0)
-                val sumTok = (sumObj?.optLong("prompt_tokens", 0) ?: 0) +
-                    (sumObj?.optLong("completion_tokens", 0) ?: 0)
-
-                val line =
-                    "事件:$totalEvents | $$totalUsd | STT:${sttMs}ms | 对话:${llmTok}t | 翻译:${trTok}t | 总结:${sumTok}t | TTS:${ttsChars}字"
-                usageSummaryState.value = line
-            } catch (e: Exception) {
-                Log.w("HiMarketVoice", "Failed to query usage summary: ${e.message}")
-            }
-        }
-    }
-
-    private fun requestRoomSessionFromHiMarket(task: String): JSONObject {
+    private fun requestRoomSessionFromHiMarket(task: String, scene: String): JSONObject {
         val url = URL("http://127.0.0.1:8080/api/v1/voice/sessions")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
@@ -1005,7 +1220,6 @@ class MainActivity : ComponentActivity() {
         conn.setRequestProperty("Content-Type", "application/json")
 
         val reqBody = if (task == "cascade") {
-            // Keep exact 4-field cascade body
             JSONObject().apply {
                 put("mode", "cascade")
                 put("llm_model", "deepseek-v4.1-flash:1017-cloud")
@@ -1013,9 +1227,16 @@ class MainActivity : ComponentActivity() {
                 put("tts_voice", "piper-local-zh")
             }.toString()
         } else {
-            val isDialogue = activeSceneState.value == "dialogue"
-            val srcLang = if (isDialogue) phoneLangState.value else sourceLangState.value
-            val tgtLang = if (isDialogue) earphoneLangState.value else targetLangState.value
+            val srcLang = when (scene) {
+                "dialogue" -> phoneLangState.value
+                "simultaneous_interpret" -> simSourceLangState.value
+                else -> sourceLangState.value
+            }
+            val tgtLang = when (scene) {
+                "dialogue" -> earphoneLangState.value
+                "simultaneous_interpret" -> simTargetLangState.value
+                else -> targetLangState.value
+            }
             JSONObject().apply {
                 put("mode", "cascade")
                 put("task", task)
@@ -1039,156 +1260,218 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun MainAppScaffold() {
+    private fun AppRouter() {
+        when (currentScreen.value) {
+            "home" -> AiAssistantHomeScreen()
+            "lang_picker" -> LanguagePickerScreen()
+            "transcribe_live" -> Scene1TranscribeLiveScreen()
+            "detail" -> RecordingDetailScreen()
+            "simultaneous" -> Scene2SimultaneousScreen()
+            "dialogue" -> Scene3DialogueScreen()
+            else -> AiAssistantHomeScreen()
+        }
+    }
+
+    // =========================================================================
+    // Screen 1: AI助手首页 (Top-left in screenshot)
+    // =========================================================================
+    @Composable
+    private fun AiAssistantHomeScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B0F19))
-                .padding(12.dp)
+                .background(BgGray)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Row(
+            // Top back chevron
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .size(32.dp)
+                    .clickable { finish() },
+                contentAlignment = Alignment.CenterStart
             ) {
-                val tabs = listOf(
-                    "home" to "AI助手",
-                    "transcribe" to "录音转写",
-                    "simultaneous" to "同声传译",
-                    "dialogue" to "对话翻译",
-                    "text_tools" to "文字/播报",
-                    "cascade" to "语音对讲",
+                Text("‹", fontSize = 26.sp, color = TextPrimary, fontWeight = FontWeight.Light)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Title row: AI助手 + 在线模型 pill
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "AI助手",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
                 )
-                tabs.forEach { (id, label) ->
-                    val selected = currentScreen.value == id
-                    Button(
-                        onClick = { currentScreen.value = id },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (selected) Color(0xFF2563EB) else Color(0xFF1E293B)
-                        ),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                Surface(
+                    color = CardWhite,
+                    shape = RoundedCornerShape(18.dp),
+                    shadowElevation = 0.5.dp
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
-                        Text(label, fontSize = 12.sp)
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(AccentGreen),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("✓", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Text("在线模型", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+                        Text("⌄", fontSize = 12.sp, color = TextSecondary)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "${statusText.value}  |  ${usageSummaryState.value}",
-                color = Color(0xFF34D399),
-                fontSize = 11.5.sp,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                when (currentScreen.value) {
-                    "home" -> AiAssistantHomeScreen()
-                    "transcribe" -> Scene1TranscribeScreen()
-                    "simultaneous" -> Scene2SimultaneousScreen()
-                    "dialogue" -> Scene3DialogueScreen()
-                    "text_tools" -> TextTranslateAndSpeakScreen()
-                    "detail" -> RecordingDetailScreen()
-                    else -> CascadeIntercomScreen()
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun AiAssistantHomeScreen() {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Text(
-                text = "AI助手 (在线模型)",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-
+            // Three Scene Cards (录音转写 / 同声传译 / 对话翻译)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                SceneCard(
+                HomeSceneCard(
                     title = "录音转写",
-                    subtitle = "流式ASR + AI总结",
+                    iconType = "transcribe",
                     modifier = Modifier.weight(1f),
-                    onClick = { currentScreen.value = "transcribe" }
+                    onClick = {
+                        langPickerTarget.value = "transcribe_start"
+                        tempPickedLang.value = sourceLangState.value
+                        currentScreen.value = "lang_picker"
+                    }
                 )
-                SceneCard(
+                HomeSceneCard(
                     title = "同声传译",
-                    subtitle = "流式翻译 + 耳机播报 + 总结",
+                    iconType = "simultaneous",
                     modifier = Modifier.weight(1f),
-                    onClick = { currentScreen.value = "simultaneous" }
+                    onClick = {
+                        isSessionActive.value = false
+                        liveSegments.clear()
+                        interimSourceText.value = ""
+                        elapsedSecondsState.value = 0L
+                        currentScreen.value = "simultaneous"
+                    }
                 )
-                SceneCard(
+                HomeSceneCard(
                     title = "对话翻译",
-                    subtitle = "手机↔耳机双向交流",
+                    iconType = "dialogue",
                     modifier = Modifier.weight(1f),
-                    onClick = { currentScreen.value = "dialogue" }
+                    onClick = {
+                        isSessionActive.value = false
+                        liveSegments.clear()
+                        interimSourceText.value = ""
+                        activeDialogueSpeaker.value = null
+                        currentScreen.value = "dialogue"
+                    }
                 )
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(22.dp))
+
             Text(
                 text = "录音记录",
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
             )
-            Spacer(modifier = Modifier.height(6.dp))
 
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Filter Pills: 全部 | 录音转写 | 同声传译
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(
                     "all" to "全部",
                     "transcribe" to "录音转写",
                     "simultaneous_interpret" to "同声传译"
                 ).forEach { (key, label) ->
-                    FilterChip(
-                        selected = historyFilter.value == key,
-                        onClick = { historyFilter.value = key },
-                        label = { Text(label, fontSize = 12.sp) }
-                    )
+                    val selected = historyFilter.value == key
+                    Surface(
+                        color = if (selected) ChipGreenBg else CardWhite,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.clickable { historyFilter.value = key }
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (selected) ChipGreenFg else TextSecondary,
+                            fontSize = 12.5.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                        )
+                    }
                 }
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             val filtered = recordingHistory.filter {
                 historyFilter.value == "all" || it.scene == historyFilter.value
             }
 
             LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(filtered) { item ->
                     Surface(
-                        color = Color(0xFF131B2E),
-                        shape = RoundedCornerShape(10.dp),
+                        color = CardWhite,
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
                                 selectedRecording.value = item
+                                detailTab.value = "summary"
                                 currentScreen.value = "detail"
                             }
                     ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(BadgePurpleBg),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                SceneMiniIcon(
+                                    isTranscribe = item.scene == "transcribe",
+                                    tint = BadgePurpleFg
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(item.title, color = Color.White, fontWeight = FontWeight.Medium)
                                 Text(
-                                    "${if (item.scene == "transcribe") "录音转写" else "同声传译"} · ${item.createdAt}",
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 12.sp
+                                    text = item.title,
+                                    color = TextPrimary,
+                                    fontSize = 14.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = item.createdAt,
+                                    color = TextMuted,
+                                    fontSize = 11.5.sp
                                 )
                             }
                             Text(
-                                LocalRecordingStore.formatDuration(item.durationMs),
-                                color = Color(0xFFCBD5E1),
+                                text = LocalRecordingStore.formatDuration(item.durationMs),
+                                color = TextMuted,
                                 fontSize = 12.sp
                             )
                         }
@@ -1196,671 +1479,1482 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "请注意！由于录音文件存储在手机本地，因此 APP 卸载后，所有的录音数据将会被永久删除。",
-                color = Color(0xFF64748B),
+                color = TextMuted,
                 fontSize = 11.sp
             )
         }
     }
 
     @Composable
-    private fun SceneCard(
+    private fun HomeSceneCard(
         title: String,
-        subtitle: String,
+        iconType: String,
         modifier: Modifier = Modifier,
         onClick: () -> Unit,
     ) {
         Surface(
-            color = Color(0xFF1E293B),
-            shape = RoundedCornerShape(12.dp),
-            modifier = modifier.clickable { onClick() }
+            color = CardWhite,
+            shape = RoundedCornerShape(14.dp),
+            modifier = modifier
+                .height(86.dp)
+                .clickable { onClick() }
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(subtitle, color = Color(0xFF94A3B8), fontSize = 11.sp)
-            }
-        }
-    }
-
-    @Composable
-    private fun LanguagePickerRow(
-        label: String,
-        selected: String,
-        onSelect: (String) -> Unit,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.horizontalScroll(rememberScrollState())
-        ) {
-            Text(label, color = Color(0xFF94A3B8), fontSize = 12.sp)
-            allowedLangsState.forEach { code ->
-                FilterChip(
-                    selected = selected == code,
-                    onClick = { onSelect(code) },
-                    label = { Text(langLabel(code), fontSize = 11.5.sp) }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Canvas(modifier = Modifier.size(26.dp)) {
+                    val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+                    when (iconType) {
+                        "transcribe" -> {
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.18f, size.height * 0.1f),
+                                size = Size(size.width * 0.64f, size.height * 0.8f),
+                                cornerRadius = CornerRadius(4.dp.toPx()),
+                                style = stroke
+                            )
+                            drawLine(
+                                color = TextPrimary,
+                                start = Offset(size.width * 0.32f, size.height * 0.38f),
+                                end = Offset(size.width * 0.68f, size.height * 0.38f),
+                                strokeWidth = 2.dp.toPx(),
+                                cap = StrokeCap.Round
+                            )
+                            drawLine(
+                                color = TextPrimary,
+                                start = Offset(size.width * 0.32f, size.height * 0.58f),
+                                end = Offset(size.width * 0.56f, size.height * 0.58f),
+                                strokeWidth = 2.dp.toPx(),
+                                cap = StrokeCap.Round
+                            )
+                        }
+                        "simultaneous" -> {
+                            drawArc(
+                                color = TextPrimary,
+                                startAngle = 180f,
+                                sweepAngle = 180f,
+                                useCenter = false,
+                                topLeft = Offset(size.width * 0.15f, size.height * 0.12f),
+                                size = Size(size.width * 0.7f, size.height * 0.7f),
+                                style = stroke
+                            )
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.12f, size.height * 0.48f),
+                                size = Size(size.width * 0.18f, size.height * 0.34f),
+                                cornerRadius = CornerRadius(3.dp.toPx()),
+                                style = stroke
+                            )
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.70f, size.height * 0.48f),
+                                size = Size(size.width * 0.18f, size.height * 0.34f),
+                                cornerRadius = CornerRadius(3.dp.toPx()),
+                                style = stroke
+                            )
+                        }
+                        else -> {
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.1f, size.height * 0.15f),
+                                size = Size(size.width * 0.52f, size.height * 0.45f),
+                                cornerRadius = CornerRadius(4.dp.toPx()),
+                                style = stroke
+                            )
+                            drawRoundRect(
+                                color = TextPrimary,
+                                topLeft = Offset(size.width * 0.38f, size.height * 0.42f),
+                                size = Size(size.width * 0.52f, size.height * 0.45f),
+                                cornerRadius = CornerRadius(4.dp.toPx()),
+                                style = stroke
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = title,
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
                 )
             }
         }
     }
 
     @Composable
-    private fun Scene1TranscribeScreen() {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Text("场景 1：现场录音转写", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+    private fun SceneMiniIcon(isTranscribe: Boolean, tint: Color) {
+        Canvas(modifier = Modifier.size(18.dp)) {
+            val stroke = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round)
+            if (isTranscribe) {
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(size.width * 0.2f, size.height * 0.12f),
+                    size = Size(size.width * 0.6f, size.height * 0.76f),
+                    cornerRadius = CornerRadius(3.dp.toPx()),
+                    style = stroke
+                )
+            } else {
+                drawArc(
+                    color = tint,
+                    startAngle = 180f,
+                    sweepAngle = 180f,
+                    useCenter = false,
+                    topLeft = Offset(size.width * 0.15f, size.height * 0.15f),
+                    size = Size(size.width * 0.7f, size.height * 0.7f),
+                    style = stroke
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // Screen 2: 选择语言页 (Row 2, Col 1 in screenshot)
+    // =========================================================================
+    @Composable
+    private fun LanguagePickerScreen() {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgGray)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clickable {
+                        currentScreen.value = when (langPickerTarget.value) {
+                            "sim_source", "sim_target" -> "simultaneous"
+                            "dlg_phone", "dlg_earphone" -> "dialogue"
+                            else -> "home"
+                        }
+                    },
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text("‹", fontSize = 26.sp, color = TextPrimary)
+            }
+
             Spacer(modifier = Modifier.height(6.dp))
-            LanguagePickerRow(
-                label = "转写语种:",
-                selected = sourceLangState.value,
-                onSelect = { sourceLangState.value = it }
+            Text(
+                text = "选择语言",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
             )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Search Box
+            Surface(
+                color = Color(0xFFEFEFF4),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("🔍", fontSize = 13.sp, color = TextMuted)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (langSearchQuery.value.isEmpty()) {
+                            Text("请输入关键词", color = TextMuted, fontSize = 13.5.sp)
+                        }
+                        BasicTextField(
+                            value = langSearchQuery.value,
+                            onValueChange = { langSearchQuery.value = it },
+                            textStyle = TextStyle(color = TextPrimary, fontSize = 13.5.sp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("最近使用", color = TextMuted, fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            val recentItem = SCREENSHOT_LANGUAGES.find { it.code == recentLangCode.value }
+                ?: SCREENSHOT_LANGUAGES.first()
+            Surface(
+                color = CardWhite,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { tempPickedLang.value = recentItem.code }
+            ) {
+                LanguageRowItem(
+                    item = recentItem,
+                    selected = tempPickedLang.value == recentItem.code
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("所有语言", color = TextMuted, fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            val q = langSearchQuery.value.trim().lowercase()
+            val filteredLangs = SCREENSHOT_LANGUAGES.filter {
+                q.isEmpty() || it.cnName.lowercase().contains(q) || it.nativeName.lowercase().contains(q)
+            }
+
+            Surface(
+                color = CardWhite,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(filteredLangs) { item ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { tempPickedLang.value = item.code }
+                        ) {
+                            LanguageRowItem(
+                                item = item,
+                                selected = tempPickedLang.value == item.code
+                            )
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                thickness = 0.5.dp,
+                                color = Color(0xFFF1F1F4)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Bottom full-width black pill button: 选择此语言
+            Button(
+                onClick = {
+                    val chosen = tempPickedLang.value
+                    recentLangCode.value = chosen
+                    when (langPickerTarget.value) {
+                        "transcribe_start" -> {
+                            sourceLangState.value = chosen
+                            currentScreen.value = "transcribe_live"
+                            startRoomTaskSession(task = "transcribe", scene = "transcribe")
+                        }
+                        "sim_source" -> {
+                            simSourceLangState.value = chosen
+                            sourceLangState.value = chosen
+                            currentScreen.value = "simultaneous"
+                        }
+                        "sim_target" -> {
+                            sendMidSessionTargetLang(chosen)
+                            currentScreen.value = "simultaneous"
+                        }
+                        "dlg_phone" -> {
+                            phoneLangState.value = chosen
+                            currentScreen.value = "dialogue"
+                        }
+                        "dlg_earphone" -> {
+                            earphoneLangState.value = chosen
+                            currentScreen.value = "dialogue"
+                        }
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = DarkBtn),
+                shape = RoundedCornerShape(26.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+            ) {
+                Text("选择此语言", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+
+    @Composable
+    private fun LanguageRowItem(item: LangItem, selected: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = item.cnName,
+                    color = TextPrimary,
+                    fontSize = 14.5.sp,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = item.nativeName,
+                    color = TextMuted,
+                    fontSize = 11.5.sp
+                )
+            }
+            if (selected) {
+                Text("✓", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+
+    // =========================================================================
+    // Screen 3: 现场录音 - 流式 ASR 进行页 (Row 2, Col 2 in screenshot)
+    // =========================================================================
+    @Composable
+    private fun Scene1TranscribeLiveScreen() {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgGray)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable {
+                            timerJob?.cancel()
+                            localRecorder?.stop()
+                            room?.disconnect()
+                            isSessionActive.value = false
+                            currentScreen.value = "home"
+                        },
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text("‹", fontSize = 26.sp, color = TextPrimary)
+                }
+                InfoCircleIcon()
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "现场录音",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .background(Color(0xFF111827), RoundedCornerShape(10.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(liveSegments) { seg ->
-                    Text(seg.sourceText, color = Color.White, fontSize = 14.sp)
+                    Text(
+                        text = seg.sourceText,
+                        color = TextPrimary,
+                        fontSize = 14.5.sp,
+                        lineHeight = 22.sp
+                    )
                 }
                 if (interimSourceText.value.isNotBlank()) {
                     item {
-                        // Green interim ASR text as shown in screenshot
                         Text(
                             text = interimSourceText.value,
-                            color = Color(0xFF22C55E),
-                            fontSize = 14.sp,
+                            color = StreamGreen,
+                            fontSize = 14.5.sp,
+                            lineHeight = 22.sp,
                             fontWeight = FontWeight.Medium
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "手机收音中 ${LocalRecordingStore.formatDuration(elapsedSecondsState.value * 1000L)}",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 13.sp
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!isSessionActive.value) {
-                        Button(onClick = {
-                            startRoomTaskSession(task = "transcribe", scene = "transcribe")
-                        }) {
-                            Text("开始录音转写")
-                        }
-                    } else {
-                        Button(onClick = { sendInRoomSummarize(speak = false) }) {
-                            Text("房间内总结")
-                        }
-                        Button(
-                            onClick = { stopSceneAndFinalize(autoSummarize = true) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE11D48))
-                        ) {
-                            Text("结束并生成AI总结")
-                        }
-                    }
-                }
-            }
-        }
-    }
+            Spacer(modifier = Modifier.height(12.dp))
 
-    @Composable
-    private fun Scene2SimultaneousScreen() {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Text("场景 2：同声传译", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(4.dp))
-            LanguagePickerRow(
-                label = "原文:",
-                selected = sourceLangState.value,
-                onSelect = { sourceLangState.value = it }
-            )
-            LanguagePickerRow(
-                label = "译文:",
-                selected = targetLangState.value,
-                onSelect = { sendMidSessionTargetLang(it) }
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            LazyColumn(
+            // Bottom centered status + timer + stop button
+            Column(
                 modifier = Modifier
-                    .weight(1f)
                     .fillMaxWidth()
-                    .background(Color(0xFF111827), RoundedCornerShape(10.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(liveSegments) { seg ->
-                    Column {
-                        Text(seg.sourceText, color = Color(0xFFCBD5E1), fontSize = 13.5.sp)
-                        if (seg.translatedText.isNotBlank()) {
-                            Text(
-                                text = seg.translatedText,
-                                color = if (seg.isFinal) Color(0xFF38BDF8) else Color(0xFF22C55E),
-                                fontSize = 14.5.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-                }
-                if (interimSourceText.value.isNotBlank()) {
-                    item {
-                        Text(
-                            text = interimSourceText.value,
-                            color = Color(0xFF22C55E),
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(bottom = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = LocalRecordingStore.formatDuration(elapsedSecondsState.value * 1000L),
-                    color = Color(0xFF94A3B8),
-                    fontSize = 13.sp
+                    text = "• 手机收音中",
+                    color = TextSecondary,
+                    fontSize = 12.sp
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!isSessionActive.value) {
-                        Button(onClick = {
-                            startRoomTaskSession(
-                                task = "speech_translate",
-                                scene = "simultaneous_interpret"
-                            )
-                        }) {
-                            Text("开始传译")
-                        }
-                    } else {
-                        Button(
-                            onClick = { stopSceneAndFinalize(autoSummarize = true) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE11D48))
-                        ) {
-                            Text("结束传译并总结")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun Scene3DialogueScreen() {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("场景 3：对话翻译（手机↔耳机）", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                if (!isSessionActive.value) {
-                    Button(onClick = {
-                        startRoomTaskSession(task = "speech_translate", scene = "dialogue")
-                    }) {
-                        Text("连接对话房间", fontSize = 12.sp)
-                    }
-                }
-            }
-
-            LanguagePickerRow(
-                label = "持手机说话:",
-                selected = phoneLangState.value,
-                onSelect = { phoneLangState.value = it }
-            )
-            LanguagePickerRow(
-                label = "戴耳机说话:",
-                selected = earphoneLangState.value,
-                onSelect = { earphoneLangState.value = it }
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Left column: Foreigner using phone app
-                Column(
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = LocalRecordingStore.formatDurationHhMmSs(elapsedSecondsState.value * 1000L),
+                    color = TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(Color(0xFF111827), RoundedCornerShape(10.dp))
-                        .padding(8.dp)
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(DarkBtn)
+                        .clickable { stopSceneAndFinalize(autoSummarize = true) },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text("外国人使用手机 (${langLabel(phoneLangState.value)})", color = Color(0xFF94A3B8), fontSize = 11.5.sp)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(liveSegments.filter { it.speaker == "phone" || it.speaker == null }) { seg ->
-                            DialogueBubble(seg, targetLang = earphoneLangState.value)
-                        }
-                        if (interimSpeaker.value == "phone" && interimSourceText.value.isNotBlank()) {
-                            item {
-                                Text(interimSourceText.value, color = Color(0xFF22C55E), fontSize = 13.sp)
-                            }
-                        }
-                    }
-                }
-
-                // Right column: User wearing earphone
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(Color(0xFF111827), RoundedCornerShape(10.dp))
-                        .padding(8.dp)
-                ) {
-                    Text("用户使用耳机 (${langLabel(earphoneLangState.value)})", color = Color(0xFF94A3B8), fontSize = 11.5.sp)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(liveSegments.filter { it.speaker == "earphone" }) { seg ->
-                            DialogueBubble(seg, targetLang = phoneLangState.value)
-                        }
-                        if (interimSpeaker.value == "earphone" && interimSourceText.value.isNotBlank()) {
-                            item {
-                                Text(interimSourceText.value, color = Color(0xFF22C55E), fontSize = 13.sp)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                val activeSpk = activeDialogueSpeaker.value
-                Button(
-                    onClick = {
-                        if (activeSpk == "phone") stopDialogueTurn() else startDialogueTurn("phone")
-                    },
-                    enabled = isSessionActive.value && (activeSpk == null || activeSpk == "phone") && !isTtsSpeaking.value,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (activeSpk == "phone") Color(0xFFE11D48) else Color(0xFF2563EB)
-                    ),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        if (activeSpk == "phone") "⏹ 停止收音 (${langLabel(phoneLangState.value)})"
-                        else "📱 持手机说话 (${langLabel(phoneLangState.value)})",
-                        fontSize = 12.sp
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(Color.White)
                     )
                 }
-
-                Button(
-                    onClick = {
-                        if (activeSpk == "earphone") stopDialogueTurn() else startDialogueTurn("earphone")
-                    },
-                    enabled = isSessionActive.value && (activeSpk == null || activeSpk == "earphone") && !isTtsSpeaking.value,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (activeSpk == "earphone") Color(0xFFE11D48) else Color(0xFF0D9488)
-                    ),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        if (activeSpk == "earphone") "⏹ 停止收音 (${langLabel(earphoneLangState.value)})"
-                        else "🎧 戴耳机说话 (${langLabel(earphoneLangState.value)})",
-                        fontSize = 12.sp
-                    )
-                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "结束",
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
             }
         }
     }
 
-    @Composable
-    private fun DialogueBubble(seg: TranscriptSegmentItem, targetLang: String) {
-        Surface(
-            color = Color(0xFF1E293B),
-            shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                Text(seg.sourceText, color = Color(0xFF22C55E), fontSize = 12.5.sp)
-                if (seg.translatedText.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(seg.translatedText, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "🔊 TTS 播报",
-                        color = Color(0xFF38BDF8),
-                        fontSize = 11.5.sp,
-                        modifier = Modifier.clickable {
-                            runHttpSpeakAndPlay(seg.translatedText, targetLang, cacheTurnId = seg.turnId)
-                        }
-                    )
-                }
-            }
-        }
-    }
-
+    // =========================================================================
+    // Screen 4: 录音/同传详情 + 倍速播放器 + AI 总结页 (Row 2 Col 3 & Row 3 Col 3)
+    // =========================================================================
     @Composable
     private fun RecordingDetailScreen() {
         val entry = selectedRecording.value
         if (entry == null) {
-            Text("未选择录音记录", color = Color.White)
+            currentScreen.value = "home"
             return
         }
-        Column(modifier = Modifier.fillMaxSize()) {
+        var showStyleMenu by remember { mutableStateOf(false) }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgGray)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            // Top bar: < on left, Share and ... on right
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = entry.title,
-                    color = Color.White,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = {
-                    stopMediaPlayer()
-                    currentScreen.value = "home"
-                }) {
-                    Text("返回列表")
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable {
+                            stopMediaPlayer()
+                            currentScreen.value = "home"
+                        },
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text("‹", fontSize = 26.sp, color = TextPrimary)
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("↱", fontSize = 18.sp, color = TextPrimary)
+                    Text("⋯", fontSize = 20.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
                 }
             }
 
-            // Local WAV audio player card with -15s, Play/Pause, +15s, and speed selector
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Title
+            Text(
+                text = entry.title,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Meta row: 现场录音 / 同声传译 + Date + Duration
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    SceneMiniIcon(
+                        isTranscribe = entry.scene == "transcribe",
+                        tint = TextMuted
+                    )
+                    Text(
+                        text = if (entry.scene == "simultaneous_interpret") "同声传译" else "现场录音",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
+                }
+                Text(
+                    text = entry.createdAt.removePrefix("2026-"),
+                    color = TextMuted,
+                    fontSize = 12.sp
+                )
+                Text(
+                    text = LocalRecordingStore.formatDuration(entry.durationMs),
+                    color = TextMuted,
+                    fontSize = 12.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Audio Player White Card
             Surface(
-                color = Color(0xFF131B2E),
-                shape = RoundedCornerShape(10.dp),
+                color = CardWhite,
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(10.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    val progressFraction = if (entry.durationMs > 0) {
+                        (playbackPositionMs.value.toFloat() / entry.durationMs.toFloat()).coerceIn(0f, 1f)
+                    } else 0f
+
+                    // Thin custom progress bar
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(10.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color(0xFFE4E4E7))
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progressFraction)
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(TextPrimary)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(TextPrimary)
+                        )
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            LocalRecordingStore.formatDuration(playbackPositionMs.value),
-                            color = Color(0xFF94A3B8),
-                            fontSize = 11.5.sp
+                            text = LocalRecordingStore.formatDurationHhMmSs(playbackPositionMs.value),
+                            color = TextMuted,
+                            fontSize = 10.5.sp
                         )
                         Text(
-                            LocalRecordingStore.formatDuration(entry.durationMs),
-                            color = Color(0xFF94A3B8),
-                            fontSize = 11.5.sp
+                            text = LocalRecordingStore.formatDurationHhMmSs(entry.durationMs),
+                            color = TextMuted,
+                            fontSize = 10.5.sp
                         )
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(onClick = { seekMediaPlayer(-15_000) }) { Text("⏪ 15s") }
-                        Button(onClick = {
-                            if (isPlayingWav.value) {
-                                stopMediaPlayer()
-                            } else {
-                                playLocalWavFile(File(entry.audioPath), playbackSpeed.value)
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.align(Alignment.Center),
+                            horizontalArrangement = Arrangement.spacedBy(28.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "↺15",
+                                color = TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.clickable { seekMediaPlayer(-15_000) }
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(DarkBtn)
+                                    .clickable {
+                                        if (isPlayingWav.value) {
+                                            stopMediaPlayer()
+                                        } else {
+                                            playLocalWavFile(File(entry.audioPath), playbackSpeed.value)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (isPlayingWav.value) "⏸" else "▶",
+                                    color = Color.White,
+                                    fontSize = 14.sp
+                                )
                             }
-                        }) {
-                            Text(if (isPlayingWav.value) "⏸ 暂停" else "▶ 播放本地录音")
+                            Text(
+                                text = "15↻",
+                                color = TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.clickable { seekMediaPlayer(15_000) }
+                            )
                         }
-                        TextButton(onClick = { seekMediaPlayer(15_000) }) { Text("15s ⏩") }
-                        TextButton(onClick = {
-                            val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-                            val nextIdx = (speeds.indexOf(playbackSpeed.value) + 1) % speeds.size
-                            updateMediaPlayerSpeed(speeds[nextIdx])
-                        }) {
-                            Text("${playbackSpeed.value}x")
-                        }
+
+                        Text(
+                            text = "${playbackSpeed.value}x",
+                            color = TextSecondary,
+                            fontSize = 12.5.sp,
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .clickable {
+                                    val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+                                    val nextIdx = (speeds.indexOf(playbackSpeed.value) + 1) % speeds.size
+                                    updateMediaPlayerSpeed(speeds[nextIdx])
+                                }
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Content White Card: AI总结 | 转写
+            Surface(
+                color = CardWhite,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.fillMaxSize().padding(14.dp)) {
+                    // Tab bar: AI总结 | 转写 + Copy icon on right
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clickable { detailTab.value = "summary" }
+                            ) {
+                                Text(
+                                    text = "AI总结",
+                                    color = if (detailTab.value == "summary") TextPrimary else TextMuted,
+                                    fontSize = 14.5.sp,
+                                    fontWeight = if (detailTab.value == "summary") FontWeight.Bold else FontWeight.Normal
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .width(24.dp)
+                                        .height(2.5.dp)
+                                        .background(
+                                            if (detailTab.value == "summary") TextPrimary else Color.Transparent,
+                                            RoundedCornerShape(2.dp)
+                                        )
+                                )
+                            }
+
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clickable { detailTab.value = "transcript" }
+                            ) {
+                                Text(
+                                    text = "转写",
+                                    color = if (detailTab.value == "transcript") TextPrimary else TextMuted,
+                                    fontSize = 14.5.sp,
+                                    fontWeight = if (detailTab.value == "transcript") FontWeight.Bold else FontWeight.Normal
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .width(24.dp)
+                                        .height(2.5.dp)
+                                        .background(
+                                            if (detailTab.value == "transcript") TextPrimary else Color.Transparent,
+                                            RoundedCornerShape(2.dp)
+                                        )
+                                )
+                            }
+                        }
+
+                        // Copy icon
+                        Text(
+                            text = "❐",
+                            color = TextSecondary,
+                            fontSize = 16.sp,
+                            modifier = Modifier.clickable {
+                                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val textToCopy = entry.summary?.summaryText ?: ""
+                                cm.setPrimaryClip(ClipData.newPlainText("AI总结", textToCopy))
+                                Toast.makeText(this@MainActivity, "已复制总结内容", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (detailTab.value == "summary") {
+                        // Pill button: [☷ 总结设置 ⌄]
+                        Box {
+                            Surface(
+                                color = Color(0xFFF4F4F5),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.clickable { showStyleMenu = true }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Text("☷", fontSize = 12.sp, color = TextPrimary)
+                                    val styleName = when (selectedSummaryStyle.value) {
+                                        "meeting" -> "总结设置 · 会议纪要"
+                                        "concise" -> "总结设置 · 精简要点"
+                                        else -> "总结设置"
+                                    }
+                                    Text(styleName, fontSize = 12.sp, color = TextPrimary)
+                                    Text("⌄", fontSize = 12.sp, color = TextSecondary)
+                                }
+                            }
+                            DropdownMenu(
+                                expanded = showStyleMenu,
+                                onDismissRequest = { showStyleMenu = false }
+                            ) {
+                                listOf(
+                                    "speech" to "演讲纪要（默认）",
+                                    "meeting" to "会议纪要",
+                                    "concise" to "精简要点"
+                                ).forEach { (styleKey, label) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label, fontSize = 13.sp) },
+                                        onClick = {
+                                            showStyleMenu = false
+                                            selectedSummaryStyle.value = styleKey
+                                            triggerHttpSummaryForEntry(entry, styleKey, speak = false)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            if (isSummarizingState.value) {
+                                Text("正在生成 AI 总结...", color = TextSecondary, fontSize = 13.5.sp)
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
+                            val sum = entry.summary
+                            if (sum != null) {
+                                StructuredMarkdownSummaryView(sum.summaryText)
+                            } else if (!isSummarizingState.value) {
+                                Text(
+                                    text = "点击上方「总结设置」生成 AI 总结。",
+                                    color = TextSecondary,
+                                    fontSize = 13.5.sp
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(18.dp))
+                            Text(
+                                text = "— 由AI生成，仅供参考，不构成任何专业建议 —",
+                                color = Color(0xFFC4C4C8),
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(entry.segments) { seg ->
+                                Column {
+                                    Text(seg.sourceText, color = TextPrimary, fontSize = 14.sp, lineHeight = 21.sp)
+                                    if (seg.translatedText.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(seg.translatedText, color = TextSecondary, fontSize = 13.5.sp, lineHeight = 20.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun StructuredMarkdownSummaryView(markdown: String) {
+        val lines = markdown.lines()
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (rawLine in lines) {
+                val line = rawLine.trim()
+                if (line.isEmpty() || line.startsWith("# ")) continue
+                when {
+                    line.startsWith("## ") -> {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = line.removePrefix("## ").trim(),
+                            color = TextPrimary,
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    line.startsWith("### ") -> {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = line.removePrefix("### ").trim(),
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    line.startsWith("- ") || line.startsWith("* ") -> {
+                        val content = line.substring(2).trim().replace("**", "")
+                        Row(modifier = Modifier.padding(start = 4.dp)) {
+                            Text("· ", color = TextSecondary, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = content,
+                                color = Color(0xFF3F3F46),
+                                fontSize = 13.5.sp,
+                                lineHeight = 20.sp
+                            )
+                        }
+                    }
+                    else -> {
+                        Text(
+                            text = line.replace("**", ""),
+                            color = Color(0xFF3F3F46),
+                            fontSize = 13.5.sp,
+                            lineHeight = 20.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Screen 5 & 6: 同声传译 (待机页 & 实时双栏流式页 - Row 3 Col 1 & Col 2)
+    // =========================================================================
+    @Composable
+    private fun Scene2SimultaneousScreen() {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgGray)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = detailTab.value == "summary",
-                        onClick = { detailTab.value = "summary" },
-                        label = { Text("AI总结") }
-                    )
-                    FilterChip(
-                        selected = detailTab.value == "transcript",
-                        onClick = { detailTab.value = "transcript" },
-                        label = { Text("转写") }
-                    )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable {
+                            timerJob?.cancel()
+                            localRecorder?.stop()
+                            room?.disconnect()
+                            isSessionActive.value = false
+                            currentScreen.value = "home"
+                        },
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text("‹", fontSize = 26.sp, color = TextPrimary)
                 }
-
-                // 总结设置 (speech / meeting / concise)
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf(
-                        "speech" to "演讲纪要",
-                        "meeting" to "会议纪要",
-                        "concise" to "精简要点"
-                    ).forEach { (styleKey, styleLabel) ->
-                        FilterChip(
-                            selected = selectedSummaryStyle.value == styleKey,
-                            onClick = {
-                                selectedSummaryStyle.value = styleKey
-                                triggerHttpSummaryForEntry(entry, styleKey, speak = false)
-                            },
-                            label = { Text(styleLabel, fontSize = 11.sp) }
-                        )
-                    }
-                }
+                InfoCircleIcon()
             }
 
             Spacer(modifier = Modifier.height(6.dp))
-            if (detailTab.value == "summary") {
+            Text(
+                text = "同声传译",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+
+            if (!isSessionActive.value && liveSegments.isEmpty()) {
+                // Idle State (Row 3, Col 1)
+                Spacer(modifier = Modifier.weight(1f))
+
+                LanguagePairSelectorBar(
+                    leftTopLabel = "原文",
+                    leftLangCode = simSourceLangState.value,
+                    onLeftClick = {
+                        langPickerTarget.value = "sim_source"
+                        tempPickedLang.value = simSourceLangState.value
+                        currentScreen.value = "lang_picker"
+                    },
+                    rightTopLabel = "译文",
+                    rightLangCode = simTargetLangState.value,
+                    onRightClick = {
+                        langPickerTarget.value = "sim_target"
+                        tempPickedLang.value = simTargetLangState.value
+                        currentScreen.value = "lang_picker"
+                    },
+                    onSwap = {
+                        val tmp = simSourceLangState.value
+                        simSourceLangState.value = simTargetLangState.value
+                        simTargetLangState.value = tmp
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(28.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "00:00:00",
+                        color = TextPrimary,
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(DarkBtn)
+                            .clickable {
+                                startRoomTaskSession(
+                                    task = "speech_translate",
+                                    scene = "simultaneous_interpret"
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        HeadphoneWhiteIcon()
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("开始传译", color = TextSecondary, fontSize = 12.sp)
+                }
+            } else {
+                // Live State (Row 3, Col 2)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Upper half: Source text + green interim text
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .background(Color(0xFF111827), RoundedCornerShape(10.dp))
-                        .padding(12.dp)
-                        .verticalScroll(rememberScrollState())
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    val sum = entry.summary
-                    if (sum == null) {
-                        Text("尚未生成总结，点击下方按钮生成。", color = Color(0xFF94A3B8))
-                    } else {
+                    liveSegments.forEach { seg ->
+                        if (seg.sourceText.isNotBlank()) {
+                            Text(
+                                text = seg.sourceText,
+                                color = TextSecondary,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
+                        }
+                    }
+                    if (interimSourceText.value.isNotBlank()) {
                         Text(
-                            text = sum.summaryText,
-                            color = Color(0xFFE2E8F0),
-                            fontSize = 13.5.sp
+                            text = interimSourceText.value,
+                            color = StreamGreen,
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = {
-                            triggerHttpSummaryForEntry(entry, selectedSummaryStyle.value, speak = false)
-                        }) {
-                            Text("生成/刷新总结")
-                        }
-                        Button(onClick = {
-                            triggerHttpSummaryForEntry(entry, selectedSummaryStyle.value, speak = true)
-                        }) {
-                            Text("🔊 生成并播报总结")
-                        }
-                    }
                 }
-            } else {
-                LazyColumn(
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 10.dp),
+                    thickness = 0.8.dp,
+                    color = Color(0xFFE4E4E7)
+                )
+
+                // Lower half: Streaming translated text
+                Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .background(Color(0xFF111827), RoundedCornerShape(10.dp))
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(entry.segments) { seg ->
-                        Column {
-                            Text(seg.sourceText, color = Color.White, fontSize = 13.5.sp)
-                            if (seg.translatedText.isNotBlank()) {
-                                Text(seg.translatedText, color = Color(0xFF38BDF8), fontSize = 13.5.sp)
-                            }
+                    liveSegments.forEach { seg ->
+                        if (seg.translatedText.isNotBlank()) {
+                            Text(
+                                text = seg.translatedText,
+                                color = TextPrimary,
+                                fontSize = 14.5.sp,
+                                lineHeight = 21.sp,
+                                fontWeight = FontWeight.Medium
+                            )
                         }
                     }
+                }
+
+                // Bottom stop control
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("• 手机收音中", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = LocalRecordingStore.formatDurationHhMmSs(elapsedSecondsState.value * 1000L),
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(DarkBtn)
+                            .clickable { stopSceneAndFinalize(autoSummarize = true) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Color.White)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("结束传译", color = TextSecondary, fontSize = 12.sp)
                 }
             }
         }
     }
 
+    // =========================================================================
+    // Screen 7 & 8: 对话翻译 (待机页 & 左右气泡对话页 - Row 4 Col 1 & Col 2)
+    // =========================================================================
     @Composable
-    private fun TextTranslateAndSpeakScreen() {
+    private fun Scene3DialogueScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .background(BgGray)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Text("文字翻译 & 语音播报 (HTTP 无房间模式)", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            LanguagePickerRow(
-                label = "目标语言:",
-                selected = targetLangState.value,
-                onSelect = { targetLangState.value = it }
-            )
-
-            OutlinedTextField(
-                value = textInputState.value,
-                onValueChange = { textInputState.value = it },
-                label = { Text("输入要翻译或朗读的文字 (最长4000字)") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
+            // Top bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(
-                    onClick = { runTextTranslationHttp(textInputState.value, targetLangState.value) },
-                    modifier = Modifier.weight(1f)
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable {
+                            activeDialogueSpeaker.value = null
+                            room?.disconnect()
+                            room = null
+                            isSessionActive.value = false
+                            currentScreen.value = "home"
+                        },
+                    contentAlignment = Alignment.CenterStart
                 ) {
-                    Text("文字翻译", fontSize = 12.sp)
+                    Text("‹", fontSize = 26.sp, color = TextPrimary)
                 }
-                Button(
-                    onClick = { runHttpSpeakAndPlay(textInputState.value, targetLangState.value) },
-                    modifier = Modifier.weight(1f)
+                if (liveSegments.isNotEmpty()) {
+                    Text(
+                        text = "对话翻译",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("🔊 直接播报原文", fontSize = 12.sp)
+                    Text("文A", fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    InfoCircleIcon()
                 }
             }
 
-            if (translatedOutputState.value.isNotBlank()) {
-                Surface(
-                    color = Color(0xFF131B2E),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
+            if (liveSegments.isEmpty() && activeDialogueSpeaker.value == null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "对话翻译",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.weight(1f))
+
+                LanguagePairSelectorBar(
+                    leftTopLabel = "持手机说话",
+                    leftLangCode = phoneLangState.value,
+                    onLeftClick = {
+                        langPickerTarget.value = "dlg_phone"
+                        tempPickedLang.value = phoneLangState.value
+                        currentScreen.value = "lang_picker"
+                    },
+                    rightTopLabel = "戴耳机说话",
+                    rightLangCode = earphoneLangState.value,
+                    onRightClick = {
+                        langPickerTarget.value = "dlg_earphone"
+                        tempPickedLang.value = earphoneLangState.value
+                        currentScreen.value = "lang_picker"
+                    },
+                    onSwap = {
+                        val tmp = phoneLangState.value
+                        phoneLangState.value = earphoneLangState.value
+                        earphoneLangState.value = tmp
+                    }
+                )
+                Spacer(modifier = Modifier.height(32.dp))
+            } else {
+                Spacer(modifier = Modifier.height(12.dp))
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text("译文结果:", color = Color(0xFF94A3B8), fontSize = 12.sp)
-                        Text(translatedOutputState.value, color = Color(0xFF38BDF8), fontSize = 14.sp)
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = {
-                                runHttpSpeakAndPlay(translatedOutputState.value, targetLangState.value)
-                            }) {
-                                Text("🔊 朗读译文", fontSize = 12.sp)
-                            }
-                            Button(onClick = {
-                                val sid = textTranslateSessionId.value ?: return@Button
-                                val tempEntry = LocalRecordingEntry(
-                                    sessionId = sid,
-                                    scene = "simultaneous_interpret",
-                                    title = "文字翻译总结",
-                                    sourceLang = sourceLangState.value,
-                                    targetLang = targetLangState.value,
-                                    audioPath = "",
-                                    durationMs = 0L,
-                                    createdAt = LocalRecordingStore.nowFormatted(),
-                                )
-                                triggerHttpSummaryForEntry(tempEntry, selectedSummaryStyle.value, speak = false)
-                            }) {
-                                Text("📝 总结当前翻译会话", fontSize = 12.sp)
+                    items(liveSegments) { seg ->
+                        val isPhone = seg.speaker != "earphone"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (isPhone) Arrangement.Start else Arrangement.End
+                        ) {
+                            Surface(
+                                color = if (isPhone) CardWhite else BubbleGray,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.widthIn(min = 180.dp, max = 265.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        text = seg.sourceText,
+                                        color = if (isPhone) StreamGreen else TextPrimary,
+                                        fontSize = 14.5.sp,
+                                        lineHeight = 20.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    if (!isPhone && seg.isFinal) {
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        SpeakerReplayIcon {
+                                            runHttpSpeakAndPlay(
+                                                seg.translatedText.ifBlank { seg.sourceText },
+                                                phoneLangState.value,
+                                                cacheTurnId = seg.turnId
+                                            )
+                                        }
+                                    }
+                                    if (seg.translatedText.isNotBlank()) {
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(vertical = 8.dp),
+                                            thickness = 0.5.dp,
+                                            color = Color(0xFFE4E4E7)
+                                        )
+                                        Text(
+                                            text = seg.translatedText,
+                                            color = if (isPhone) StreamGreen else TextSecondary,
+                                            fontSize = 14.sp,
+                                            lineHeight = 19.sp
+                                        )
+                                    }
+                                    if (isPhone) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        if (seg.isFinal) {
+                                            SpeakerReplayIcon {
+                                                runHttpSpeakAndPlay(
+                                                    seg.translatedText.ifBlank { seg.sourceText },
+                                                    earphoneLangState.value,
+                                                    cacheTurnId = seg.turnId
+                                                )
+                                            }
+                                        } else {
+                                            Text(
+                                                text = "正在收音...",
+                                                color = TextMuted,
+                                                fontSize = 11.5.sp
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
-            liveSummaryRecord.value?.let { sum ->
-                Surface(
-                    color = Color(0xFF1E293B),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
+            // Bottom Dual Circular Buttons: 英语 (phone) | 中文（简体） (earphone)
+            val activeSpk = activeDialogueSpeaker.value
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val phoneEnabled = (activeSpk == null || activeSpk == "phone") && !isTtsSpeaking.value
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.alpha(if (phoneEnabled) 1f else 0.38f)
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text("AI总结：《${sum.title}》", color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(sum.summaryText, color = Color.White, fontSize = 13.sp)
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(DarkBtn)
+                            .clickable(enabled = phoneEnabled) {
+                                if (activeSpk == "phone") stopDialogueTurn() else startDialogueTurn("phone")
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (activeSpk == "phone") {
+                            Box(
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Color.White)
+                            )
+                        } else {
+                            HeadphoneWhiteIcon()
+                        }
                     }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = langLabel(phoneLangState.value),
+                        color = TextPrimary,
+                        fontSize = 12.sp
+                    )
+                }
+
+                val earphoneEnabled = (activeSpk == null || activeSpk == "earphone") && !isTtsSpeaking.value
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.alpha(if (earphoneEnabled) 1f else 0.38f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(DarkBtn)
+                            .clickable(enabled = earphoneEnabled) {
+                                if (activeSpk == "earphone") stopDialogueTurn() else startDialogueTurn("earphone")
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (activeSpk == "earphone") {
+                            Box(
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Color.White)
+                            )
+                        } else {
+                            MicWhiteIcon()
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = langLabel(earphoneLangState.value),
+                        color = TextPrimary,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }
     }
 
     @Composable
-    private fun CascadeIntercomScreen() {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = {
-                        startRoomTaskSession(
-                            task = "cascade",
-                            scene = "cascade",
-                            initialPrompt = "你好，请用一句话介绍HiMarket语音平台。"
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("启动对讲", fontSize = 12.sp)
+    private fun SpeakerReplayIcon(onClick: () -> Unit) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clickable { onClick() }
+                .padding(vertical = 2.dp)
+        ) {
+            Canvas(modifier = Modifier.size(16.dp)) {
+                val stroke = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round)
+                val path = Path().apply {
+                    moveTo(size.width * 0.15f, size.height * 0.38f)
+                    lineTo(size.width * 0.35f, size.height * 0.38f)
+                    lineTo(size.width * 0.58f, size.height * 0.18f)
+                    lineTo(size.width * 0.58f, size.height * 0.82f)
+                    lineTo(size.width * 0.35f, size.height * 0.62f)
+                    lineTo(size.width * 0.15f, size.height * 0.62f)
+                    close()
                 }
-                Button(
-                    onClick = { sendVoicePromptTurn("请问今天深圳的天气适合出门吗？请简短回答。") },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("发送追问", fontSize = 12.sp)
-                }
-                Button(
-                    onClick = { sendInRoomSummarize(speak = true) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("总结通话", fontSize = 12.sp)
-                }
+                drawPath(path, color = TextSecondary, style = stroke)
+                drawArc(
+                    color = TextSecondary,
+                    startAngle = -45f,
+                    sweepAngle = 90f,
+                    useCenter = false,
+                    topLeft = Offset(size.width * 0.52f, size.height * 0.25f),
+                    size = Size(size.width * 0.34f, size.height * 0.5f),
+                    style = stroke
+                )
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .background(Color(0xFF0F172A), RoundedCornerShape(10.dp))
-                    .padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+        }
+    }
+
+    @Composable
+    private fun HeadphoneWhiteIcon() {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            drawArc(
+                color = Color.White,
+                startAngle = 180f,
+                sweepAngle = 180f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.15f, size.height * 0.12f),
+                size = Size(size.width * 0.7f, size.height * 0.7f),
+                style = stroke
+            )
+            drawRoundRect(
+                color = Color.White,
+                topLeft = Offset(size.width * 0.12f, size.height * 0.48f),
+                size = Size(size.width * 0.18f, size.height * 0.34f),
+                cornerRadius = CornerRadius(3.dp.toPx()),
+                style = stroke
+            )
+            drawRoundRect(
+                color = Color.White,
+                topLeft = Offset(size.width * 0.70f, size.height * 0.48f),
+                size = Size(size.width * 0.18f, size.height * 0.34f),
+                cornerRadius = CornerRadius(3.dp.toPx()),
+                style = stroke
+            )
+        }
+    }
+
+    @Composable
+    private fun MicWhiteIcon() {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            drawRoundRect(
+                color = Color.White,
+                topLeft = Offset(size.width * 0.34f, size.height * 0.12f),
+                size = Size(size.width * 0.32f, size.height * 0.46f),
+                cornerRadius = CornerRadius(6.dp.toPx()),
+                style = stroke
+            )
+            drawArc(
+                color = Color.White,
+                startAngle = 0f,
+                sweepAngle = 180f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.22f, size.height * 0.32f),
+                size = Size(size.width * 0.56f, size.height * 0.42f),
+                style = stroke
+            )
+            drawLine(
+                color = Color.White,
+                start = Offset(size.width * 0.5f, size.height * 0.74f),
+                end = Offset(size.width * 0.5f, size.height * 0.88f),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+    }
+
+    @Composable
+    private fun LanguagePairSelectorBar(
+        leftTopLabel: String,
+        leftLangCode: String,
+        onLeftClick: () -> Unit,
+        rightTopLabel: String,
+        rightLangCode: String,
+        onRightClick: () -> Unit,
+        onSwap: () -> Unit,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable { onLeftClick() }
             ) {
-                items(chatLogs) { line ->
+                Text(leftTopLabel, color = TextMuted, fontSize = 11.5.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = line,
-                        color = Color(0xFFE2E8F0),
-                        fontSize = 12.5.sp,
-                        fontFamily = FontFamily.Monospace
+                        text = langLabel(leftLangCode),
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
+                    Text(" ⌄", color = TextSecondary, fontSize = 13.sp)
                 }
             }
+
+            Text(
+                text = "⇄",
+                color = TextMuted,
+                fontSize = 18.sp,
+                modifier = Modifier.clickable { onSwap() }
+            )
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable { onRightClick() }
+            ) {
+                Text(rightTopLabel, color = TextMuted, fontSize = 11.5.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = langLabel(rightLangCode),
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(" ⌄", color = TextSecondary, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun InfoCircleIcon() {
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .border(1.2.dp, TextPrimary, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("!", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
         }
     }
 }

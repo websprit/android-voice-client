@@ -75,6 +75,14 @@ object LocalRecordingStore {
         return String.format(Locale.US, "%02d:%02d", min, sec)
     }
 
+    fun formatDurationHhMmSs(ms: Long): String {
+        val totalSec = (ms / 1000).coerceAtLeast(0)
+        val hrs = totalSec / 3600
+        val min = (totalSec % 3600) / 60
+        val sec = totalSec % 60
+        return String.format(Locale.US, "%02d:%02d:%02d", hrs, min, sec)
+    }
+
     fun loadAll(context: Context): MutableList<LocalRecordingEntry> {
         val file = indexFile(context)
         if (!file.exists()) return mutableListOf()
