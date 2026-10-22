@@ -1284,9 +1284,6 @@ class MainActivity : ComponentActivity() {
         val reqBody = if (task == "cascade") {
             JSONObject().apply {
                 put("mode", "cascade")
-                put("llm_model", "deepseek-v4.1-flash:1017-cloud")
-                put("stt_model", "faster-whisper-local")
-                put("tts_voice", "piper-local-zh")
                 if (scene == "ai_freetalk") {
                     put("system_prompt", selectedPersonaState.value.systemPrompt)
                     put("greeting_text", selectedPersonaState.value.freetalkSubtitle)
