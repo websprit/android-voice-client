@@ -838,28 +838,21 @@ class MainActivity : ComponentActivity() {
                     simTargetLangState.value = newLang
                     appendLog("✓ 目标语言已切至 ${langLabel(newLang)}")
                 }
+                "user_speaking" -> {
+                    if (!isTtsSpeaking.value) {
+                        freetalkStatusState.value = "正在听你说..."
+                    }
+                }
+                "agent_thinking" -> {
+                    freetalkStatusState.value = "思考中..."
+                }
                 "agent_speaking" -> {
                     val speaking = obj.optBoolean("speaking", false)
                     isTtsSpeaking.value = speaking
                     if (speaking) {
                         freetalkStatusState.value = "回应中"
-                        lifecycleScope.launch {
-                            try {
-                                room?.localParticipant?.setMicrophoneEnabled(false)
-                            } catch (_: Exception) {
-                            }
-                        }
                     } else {
                         freetalkStatusState.value = "正在听"
-                        lifecycleScope.launch {
-                            delay(350)
-                            if (!isTtsSpeaking.value && isSessionActive.value) {
-                                try {
-                                    room?.localParticipant?.setMicrophoneEnabled(true)
-                                } catch (_: Exception) {
-                                }
-                            }
-                        }
                     }
                 }
                 "tts_state" -> {
@@ -868,23 +861,8 @@ class MainActivity : ComponentActivity() {
                     if (state == "start") {
                         isTtsSpeaking.value = true
                         DialogueAudioRouter.routeForTargetDevice(this, targetDevice)
-                        lifecycleScope.launch {
-                            try {
-                                room?.localParticipant?.setMicrophoneEnabled(false)
-                            } catch (_: Exception) {
-                            }
-                        }
                     } else if (state == "end") {
                         isTtsSpeaking.value = false
-                        lifecycleScope.launch {
-                            delay(350)
-                            if (!isTtsSpeaking.value && isSessionActive.value) {
-                                try {
-                                    room?.localParticipant?.setMicrophoneEnabled(true)
-                                } catch (_: Exception) {
-                                }
-                            }
-                        }
                     }
                 }
                 "summary_input_ack" -> {
