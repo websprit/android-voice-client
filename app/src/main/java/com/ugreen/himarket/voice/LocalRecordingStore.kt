@@ -385,7 +385,10 @@ object DialogueAudioRouter {
     }
 }
 
-class HoldMicRecorder(private val sampleRate: Int = 16000) {
+class HoldMicRecorder(
+    private val sampleRate: Int = 16000,
+    private val audioSource: Int = MediaRecorder.AudioSource.MIC,
+) {
     private val running = AtomicBoolean(false)
     private var workerThread: Thread? = null
     private val pcmStream = ByteArrayOutputStream()
@@ -405,7 +408,7 @@ class HoldMicRecorder(private val sampleRate: Int = 16000) {
                     AudioFormat.ENCODING_PCM_16BIT
                 ).coerceAtLeast(3200)
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    audioSource,
                     sampleRate,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,

@@ -657,6 +657,8 @@ class MainActivity : ComponentActivity() {
 
                 stopMediaPlayer()
                 room?.disconnect()
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val hasHeadset = DialogueAudioRouter.hasHeadsetConnected(audioManager)
                 val lkRoom = LiveKit.create(
                     appContext = applicationContext,
                     overrides = LiveKitOverrides(
@@ -664,7 +666,10 @@ class MainActivity : ComponentActivity() {
                             audioHandler = NoAudioHandler(),
                             disableCommunicationModeWorkaround = true,
                             javaAudioDeviceModuleCustomizer = { builder ->
-                                builder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                                builder.setAudioSource(
+                                    if (hasHeadset) MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                                    else MediaRecorder.AudioSource.MIC
+                                )
                             },
                         )
                     )
@@ -693,7 +698,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 if (scene == "dialogue") {
                     val curSpk = activeDialogueSpeaker.value
@@ -928,6 +932,23 @@ class MainActivity : ComponentActivity() {
             localRecorder = null
 
             if (sid != "-" && (scene == "transcribe" || scene == "simultaneous_interpret")) {
+                val pendingInterim = interimSourceText.value.trim()
+                if (pendingInterim.isNotBlank()) {
+                    val tid = interimTurnId.value ?: "int_${UUID.randomUUID().toString().take(8)}"
+                    if (liveSegments.none { it.turnId == tid }) {
+                        liveSegments.add(
+                            TranscriptSegmentItem(
+                                turnId = tid,
+                                seq = (liveSegments.size + 1).toLong(),
+                                speaker = interimSpeaker.value,
+                                sourceText = pendingInterim,
+                                isFinal = true,
+                            )
+                        )
+                    }
+                    interimSourceText.value = ""
+                    interimTurnId.value = null
+                }
                 val count = recordingHistory.count { it.scene == scene } + 1
                 val defaultTitle = if (scene == "transcribe") "现场录音$count" else "同声传译$count"
                 val wavPath = LocalRecordingStore.wavFileForSession(this@MainActivity, sid).absolutePath
@@ -1021,6 +1042,11 @@ class MainActivity : ComponentActivity() {
         summaryStyle: String,
         speak: Boolean,
     ) {
+        if (entry.segments.isEmpty()) {
+            Toast.makeText(this, "当前录音暂无转写文字，请先说话录下内容再生成总结", Toast.LENGTH_SHORT).show()
+            appendLog("⚠️ 总结跳过: 当前录音无转写片段")
+            return
+        }
         lifecycleScope.launch {
             val reqId = "sum_${UUID.randomUUID().toString().take(10)}"
             isSummarizingState.value = true
@@ -1062,6 +1088,7 @@ class MainActivity : ComponentActivity() {
                     playSummarySegmentsHttp(entry.sessionId, reqId, segCount)
                 }
             } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "总结失败: ${e.message}", Toast.LENGTH_SHORT).show()
                 appendLog("❌ 总结失败: ${e.message}")
             } finally {
                 isSummarizingState.value = false
@@ -1130,7 +1157,7 @@ class MainActivity : ComponentActivity() {
                 if (status == 200) {
                     return respJson.getJSONObject("data")
                 }
-                if (status == 404 && !useInline && fallbackSegments.isNotEmpty()) {
+                if ((status == 404 || status == 400) && !useInline && fallbackSegments.isNotEmpty()) {
                     useInline = true
                     continue
                 }
@@ -1496,9 +1523,16 @@ class MainActivity : ComponentActivity() {
         stopMediaPlayer()
         room?.disconnect()
         room = null
-        DialogueAudioRouter.clearCommunicationRoute(this)
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val hasHeadset = DialogueAudioRouter.hasHeadsetConnected(am)
+        if (hasHeadset) {
+            DialogueAudioRouter.routePreferredOutput(this)
+        } else {
+            DialogueAudioRouter.clearCommunicationRoute(this)
+        }
         isHoldSpeaking.value = true
-        val rec = holdMicRecorder ?: HoldMicRecorder(16000).also { holdMicRecorder = it }
+        val src = if (hasHeadset) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.MIC
+        val rec = HoldMicRecorder(16000, src).also { holdMicRecorder = it }
         rec.start()
         appendLog("🎙 开始按住说话收音...")
     }
