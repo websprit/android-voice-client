@@ -695,7 +695,16 @@ class MainActivity : ComponentActivity() {
 
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                DialogueAudioRouter.routeForTargetDevice(this@MainActivity, "speaker")
+                if (scene == "dialogue") {
+                    val curSpk = activeDialogueSpeaker.value
+                    if (curSpk != null) {
+                        DialogueAudioRouter.routeForInputSpeaker(this@MainActivity, curSpk)
+                    } else {
+                        DialogueAudioRouter.routePreferredOutput(this@MainActivity)
+                    }
+                } else {
+                    DialogueAudioRouter.routePreferredOutput(this@MainActivity)
+                }
                 audioManager.setStreamVolume(
                     AudioManager.STREAM_VOICE_CALL,
                     ((audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL) * 3) / 5).coerceAtLeast(1),
@@ -719,7 +728,14 @@ class MainActivity : ComponentActivity() {
                     ) == PackageManager.PERMISSION_GRANTED
                 ) {
                     lkRoom.localParticipant.setMicrophoneEnabled(true)
-                    DialogueAudioRouter.routeForTargetDevice(this@MainActivity, "speaker")
+                    if (scene == "dialogue") {
+                        val curSpk = activeDialogueSpeaker.value
+                        if (curSpk != null) {
+                            DialogueAudioRouter.routeForInputSpeaker(this@MainActivity, curSpk)
+                        }
+                    } else {
+                        DialogueAudioRouter.routePreferredOutput(this@MainActivity)
+                    }
                     if (scene == "transcribe" || scene == "simultaneous_interpret") {
                         localRecorder?.stop()
                         val wavFile = LocalRecordingStore.wavFileForSession(this@MainActivity, sessionId)
@@ -875,7 +891,11 @@ class MainActivity : ComponentActivity() {
                     val targetDevice = obj.optString("target_device", "speaker")
                     if (state == "start") {
                         isTtsSpeaking.value = true
-                        DialogueAudioRouter.routeForTargetDevice(this, targetDevice)
+                        if (activeSceneState.value == "dialogue") {
+                            DialogueAudioRouter.routeForTargetDevice(this, targetDevice)
+                        } else {
+                            DialogueAudioRouter.routePreferredOutput(this)
+                        }
                     } else if (state == "end") {
                         isTtsSpeaking.value = false
                     }
@@ -903,11 +923,7 @@ class MainActivity : ComponentActivity() {
             isSessionActive.value = false
             room?.disconnect()
             room = null
-            try {
-                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.mode = AudioManager.MODE_NORMAL
-            } catch (_: Exception) {
-            }
+            DialogueAudioRouter.clearCommunicationRoute(this@MainActivity)
             val durMs = localRecorder?.stop() ?: (elapsedSecondsState.value * 1000L)
             localRecorder = null
 
@@ -1232,10 +1248,15 @@ class MainActivity : ComponentActivity() {
         stopMediaPlayer()
         try {
             if (room == null) {
-                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.mode = AudioManager.MODE_NORMAL
+                DialogueAudioRouter.clearCommunicationRoute(this)
             }
             val mp = MediaPlayer()
+            mp.setAudioAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
             mp.setDataSource(file.absolutePath)
             mp.prepare()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1475,11 +1496,7 @@ class MainActivity : ComponentActivity() {
         stopMediaPlayer()
         room?.disconnect()
         room = null
-        try {
-            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            am.mode = AudioManager.MODE_NORMAL
-        } catch (_: Exception) {
-        }
+        DialogueAudioRouter.clearCommunicationRoute(this)
         isHoldSpeaking.value = true
         val rec = holdMicRecorder ?: HoldMicRecorder(16000).also { holdMicRecorder = it }
         rec.start()
@@ -1594,6 +1611,7 @@ class MainActivity : ComponentActivity() {
                     room?.disconnect()
                     room = null
                     isSessionActive.value = false
+                    DialogueAudioRouter.clearCommunicationRoute(this@MainActivity)
                     currentScreen.value = "ai_chat"
                 }
             )

@@ -267,6 +267,61 @@ class LocalWavRecorder(private val outputFile: File, private val sampleRate: Int
 }
 
 object DialogueAudioRouter {
+    fun hasHeadsetConnected(am: AudioManager): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val commHeadset = am.availableCommunicationDevices.any {
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+            }
+            if (commHeadset) return true
+        }
+        val outDevices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        return outDevices.any {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER ||
+                it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+        }
+    }
+
+    /**
+     * Route audio for all non-dialogue features (AI FreeTalk, Simultaneous Interpret, Transcribe):
+     * when a Bluetooth/wired headset is connected, always output to the headset; otherwise use speaker.
+     */
+    fun routePreferredOutput(context: Context) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.mode = AudioManager.MODE_IN_COMMUNICATION
+        if (hasHeadsetConnected(am)) {
+            routeToEarphone(am)
+        } else {
+            routeToPhoneSpeaker(am)
+        }
+    }
+
+    /**
+     * Clear any sticky communication device override and restore normal media routing (Bluetooth A2DP / default).
+     */
+    @Suppress("DEPRECATION")
+    fun clearCommunicationRoute(context: Context) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.clearCommunicationDevice()
+            }
+            am.stopBluetoothSco()
+            am.isBluetoothScoOn = false
+            am.isSpeakerphoneOn = false
+            am.mode = AudioManager.MODE_NORMAL
+        } catch (_: Exception) {
+        }
+    }
+
     fun routeForInputSpeaker(context: Context, speaker: String) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -289,17 +344,20 @@ object DialogueAudioRouter {
 
     @Suppress("DEPRECATION")
     private fun routeToEarphone(am: AudioManager) {
+        am.isSpeakerphoneOn = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val bt = am.availableCommunicationDevices.firstOrNull {
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+            val headset = am.availableCommunicationDevices.firstOrNull {
+                it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET
             }
-            if (bt != null) {
-                am.setCommunicationDevice(bt)
+            if (headset != null) {
+                am.setCommunicationDevice(headset)
                 return
             }
         }
-        am.isSpeakerphoneOn = false
         try {
             am.startBluetoothSco()
             am.isBluetoothScoOn = true
