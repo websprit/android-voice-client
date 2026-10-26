@@ -103,6 +103,7 @@ class MainActivity : ComponentActivity() {
 
     private var room: Room? = null
     private var localRecorder: LocalWavRecorder? = null
+    private var holdMicRecorder: HoldMicRecorder? = null
     private var timerJob: Job? = null
     private var mediaPlayer: MediaPlayer? = null
 
@@ -1471,6 +1472,88 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startHoldSpeakRecording() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        stopMediaPlayer()
+        room?.disconnect()
+        room = null
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.mode = AudioManager.MODE_NORMAL
+        } catch (_: Exception) {
+        }
+        isHoldSpeaking.value = true
+        val rec = holdMicRecorder ?: HoldMicRecorder(16000).also { holdMicRecorder = it }
+        rec.start()
+        appendLog("🎙 开始按住说话收音...")
+    }
+
+    private fun finishHoldSpeakAndSend() {
+        if (!isHoldSpeaking.value) return
+        isHoldSpeaking.value = false
+        val pcmBytes = holdMicRecorder?.stopAndGetPcm() ?: ByteArray(0)
+        if (pcmBytes.size < 6400) {
+            Toast.makeText(this, "说话时间太短", Toast.LENGTH_SHORT).show()
+            appendLog("⚠️ 按住说话时间太短 (${pcmBytes.size} bytes)")
+            return
+        }
+        isAiChatSending.value = true
+        lifecycleScope.launch {
+            try {
+                val recognizedText = withContext(Dispatchers.IO) {
+                    val b64 = android.util.Base64.encodeToString(pcmBytes, android.util.Base64.NO_WRAP)
+                    val conn = URL("http://127.0.0.1:8080/v1/audio/transcriptions")
+                        .openConnection() as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 25000
+                    conn.doOutput = true
+                    conn.setRequestProperty("Authorization", "Bearer hm_ak_live_ugreen_2026_voice_key")
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    val req = JSONObject().apply {
+                        put("audio_base64", b64)
+                        put("format", "pcm")
+                        put("sample_rate", 16000)
+                        put("language", "zh")
+                    }
+                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use {
+                        it.write(req.toString())
+                    }
+                    val status = conn.responseCode
+                    val respText = (if (status in 200..299) conn.inputStream else conn.errorStream)
+                        ?.bufferedReader()?.readText().orEmpty()
+                    if (status !in 200..299) {
+                        throw RuntimeException("语音识别失败($status)")
+                    }
+                    val json = JSONObject(respText)
+                    val rawText = json.optString("text", "").trim()
+                    if (rawText.startsWith("[") && rawText.contains("语音识别结果")) {
+                        ""
+                    } else {
+                        rawText
+                    }
+                }
+                isAiChatSending.value = false
+                if (recognizedText.isBlank()) {
+                    Toast.makeText(this@MainActivity, "未识别到语音，请靠近麦克风重试", Toast.LENGTH_SHORT).show()
+                    appendLog("⚠️ 按住说话未识别到有效语音")
+                    return@launch
+                }
+                appendLog("🧑 按住说话识别: $recognizedText")
+                sendAiChatMessageHttp(recognizedText, speakReply = true)
+            } catch (e: Exception) {
+                isAiChatSending.value = false
+                Toast.makeText(this@MainActivity, "语音识别失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                appendLog("❌ 按住说话识别失败: ${e.message}")
+            }
+        }
+    }
+
     @Composable
     private fun AppRouter() {
         when (currentScreen.value) {
@@ -1504,13 +1587,10 @@ class MainActivity : ComponentActivity() {
                     sendAiChatMessageHttp(text, speakReply = true)
                 },
                 onStartHoldSpeak = {
-                    isHoldSpeaking.value = true
+                    startHoldSpeakRecording()
                 },
                 onFinishHoldSpeak = {
-                    if (isHoldSpeaking.value) {
-                        isHoldSpeaking.value = false
-                        sendAiChatMessageHttp("最近工作有些累，我想找个人聊聊。", speakReply = true)
-                    }
+                    finishHoldSpeakAndSend()
                 }
             )
             "ai_freetalk" -> AiFreeTalkScreenView(

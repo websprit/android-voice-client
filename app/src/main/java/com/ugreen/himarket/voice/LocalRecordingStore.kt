@@ -10,6 +10,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -323,5 +324,74 @@ object DialogueAudioRouter {
         } catch (_: Exception) {
         }
         am.isSpeakerphoneOn = true
+    }
+}
+
+class HoldMicRecorder(private val sampleRate: Int = 16000) {
+    private val running = AtomicBoolean(false)
+    private var workerThread: Thread? = null
+    private val pcmStream = ByteArrayOutputStream()
+
+    @SuppressLint("MissingPermission")
+    fun start() {
+        if (running.getAndSet(true)) return
+        synchronized(pcmStream) {
+            pcmStream.reset()
+        }
+        workerThread = Thread {
+            var audioRecord: AudioRecord? = null
+            try {
+                val minBuf = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(3200)
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 2
+                )
+                val buf = ByteArray(1600)
+                if (audioRecord.state == AudioRecord.STATE_INITIALIZED) {
+                    audioRecord.startRecording()
+                    while (running.get()) {
+                        val n = audioRecord.read(buf, 0, buf.size)
+                        if (n > 0) {
+                            synchronized(pcmStream) {
+                                pcmStream.write(buf, 0, n)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try {
+                    audioRecord?.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    audioRecord?.release()
+                } catch (_: Exception) {
+                }
+            }
+        }.apply {
+            name = "hold-mic-recorder"
+            isDaemon = true
+            start()
+        }
+    }
+
+    fun stopAndGetPcm(): ByteArray {
+        if (!running.getAndSet(false)) return ByteArray(0)
+        try {
+            workerThread?.join(600)
+        } catch (_: Exception) {
+        }
+        workerThread = null
+        return synchronized(pcmStream) {
+            pcmStream.toByteArray()
+        }
     }
 }

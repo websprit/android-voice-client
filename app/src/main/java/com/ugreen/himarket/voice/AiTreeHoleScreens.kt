@@ -5,7 +5,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -549,45 +552,45 @@ fun AiChatScreenView(
         Spacer(modifier = Modifier.height(10.dp))
 
         // Bottom Input Pill Bar
+        val currentOnStartHold by rememberUpdatedState(onStartHoldSpeak)
+        val currentOnFinishHold by rememberUpdatedState(onFinishHoldSpeak)
         Surface(
-            color = Color.White,
+            color = if (!textMode && isRecordingHold) Color(0xFFDDF5EC) else Color.White,
             shape = RoundedCornerShape(28.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(54.dp)
         ) {
             if (!textMode) {
-                Box(
+                Row(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = 8.dp),
-                    contentAlignment = Alignment.Center
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
+                            .weight(1f)
+                            .fillMaxHeight()
                             .pointerInput(Unit) {
-                                detectTapGestures(
-                                    onPress = {
-                                        onStartHoldSpeak()
-                                        tryAwaitRelease()
-                                        onFinishHoldSpeak()
-                                    }
-                                )
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    currentOnStartHold()
+                                    waitForUpOrCancellation()
+                                    currentOnFinishHold()
+                                }
                             },
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (isRecordingHold) "松开 发送" else "按住说话",
-                            color = Color(0xFF18181B),
+                            text = if (isRecordingHold) "● 松开 发送（正在收音...）" else "按住说话",
+                            color = if (isRecordingHold) Color(0xFF059669) else Color(0xFF18181B),
                             fontSize = 15.5.sp,
                             fontWeight = FontWeight.Medium
                         )
                     }
 
-                    Box(modifier = Modifier.align(Alignment.CenterEnd)) {
-                        KeyboardCircleIcon(onClick = { textMode = true })
-                    }
+                    KeyboardCircleIcon(onClick = { textMode = true })
                 }
             } else {
                 Row(
