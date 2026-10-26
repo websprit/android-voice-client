@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.media.PlaybackParams
 import android.os.Build
 import android.os.Bundle
@@ -49,8 +50,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import io.livekit.android.AudioOptions
 import io.livekit.android.ConnectOptions
 import io.livekit.android.LiveKit
+import io.livekit.android.LiveKitOverrides
+import io.livekit.android.audio.NoAudioHandler
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
@@ -128,10 +132,10 @@ class MainActivity : ComponentActivity() {
     private val allowedLangsState = mutableStateListOf("zh", "de", "en", "es", "fr", "id", "it", "ja")
     private val sourceLangState = mutableStateOf("zh")
     private val targetLangState = mutableStateOf("zh")
-    private val simSourceLangState = mutableStateOf("en")
-    private val simTargetLangState = mutableStateOf("zh")
-    private val phoneLangState = mutableStateOf("en")
-    private val earphoneLangState = mutableStateOf("zh")
+    private val simSourceLangState = mutableStateOf("zh")
+    private val simTargetLangState = mutableStateOf("en")
+    private val phoneLangState = mutableStateOf("zh")
+    private val earphoneLangState = mutableStateOf("en")
 
     private val activeTaskState = mutableStateOf("cascade")
     private val activeSceneState = mutableStateOf("")
@@ -421,8 +425,8 @@ class MainActivity : ComponentActivity() {
                         liveSegments.clear()
                         interimSourceText.value = ""
                         elapsedSecondsState.value = 0L
-                        simSourceLangState.value = "en"
-                        simTargetLangState.value = "zh"
+                        simSourceLangState.value = "zh"
+                        simTargetLangState.value = "en"
                         currentScreen.value = "simultaneous"
                     }
                     "open_simultaneous_live" -> {
@@ -653,7 +657,18 @@ class MainActivity : ComponentActivity() {
 
                 stopMediaPlayer()
                 room?.disconnect()
-                val lkRoom = LiveKit.create(applicationContext)
+                val lkRoom = LiveKit.create(
+                    appContext = applicationContext,
+                    overrides = LiveKitOverrides(
+                        audioOptions = AudioOptions(
+                            audioHandler = NoAudioHandler(),
+                            disableCommunicationModeWorkaround = true,
+                            javaAudioDeviceModuleCustomizer = { builder ->
+                                builder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                            },
+                        )
+                    )
+                )
                 room = lkRoom
 
                 lifecycleScope.launch {
@@ -680,8 +695,7 @@ class MainActivity : ComponentActivity() {
 
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                @Suppress("DEPRECATION")
-                audioManager.isSpeakerphoneOn = true
+                DialogueAudioRouter.routeForTargetDevice(this@MainActivity, "speaker")
                 audioManager.setStreamVolume(
                     AudioManager.STREAM_VOICE_CALL,
                     ((audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL) * 3) / 5).coerceAtLeast(1),
@@ -705,6 +719,7 @@ class MainActivity : ComponentActivity() {
                     ) == PackageManager.PERMISSION_GRANTED
                 ) {
                     lkRoom.localParticipant.setMicrophoneEnabled(true)
+                    DialogueAudioRouter.routeForTargetDevice(this@MainActivity, "speaker")
                     if (scene == "transcribe" || scene == "simultaneous_interpret") {
                         localRecorder?.stop()
                         val wavFile = LocalRecordingStore.wavFileForSession(this@MainActivity, sessionId)
