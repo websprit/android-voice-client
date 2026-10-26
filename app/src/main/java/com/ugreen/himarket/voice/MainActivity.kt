@@ -170,6 +170,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -1283,7 +1288,6 @@ class MainActivity : ComponentActivity() {
 
         val reqBody = if (task == "cascade") {
             JSONObject().apply {
-                put("mode", "cascade")
                 if (scene == "ai_freetalk") {
                     put("system_prompt", selectedPersonaState.value.systemPrompt)
                     put("greeting_text", selectedPersonaState.value.freetalkSubtitle)
@@ -1301,7 +1305,6 @@ class MainActivity : ComponentActivity() {
                 else -> targetLangState.value
             }
             JSONObject().apply {
-                put("mode", "cascade")
                 put("task", task)
                 put("source_lang", srcLang)
                 if (task == "speech_translate" || task == "speak") {
