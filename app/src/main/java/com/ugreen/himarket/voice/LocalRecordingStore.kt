@@ -203,58 +203,22 @@ class LocalWavRecorder(private val outputFile: File, private val sampleRate: Int
     fun start() {
         if (running.getAndSet(true)) return
         workerThread = Thread {
-            var audioRecord: AudioRecord? = null
             var totalPcmBytes = 0L
             try {
                 FileOutputStream(outputFile).use { fos ->
                     fos.write(buildWavHeader(0, sampleRate))
-                    val minBuf = AudioRecord.getMinBufferSize(
-                        sampleRate,
-                        AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT
-                    ).coerceAtLeast(3200)
-                    audioRecord = try {
-                        AudioRecord(
-                            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                            sampleRate,
-                            AudioFormat.CHANNEL_IN_MONO,
-                            AudioFormat.ENCODING_PCM_16BIT,
-                            minBuf * 2
-                        )
-                    } catch (_: Exception) {
-                        null
-                    }
+                    // Do not open a second hardware AudioRecord(VOICE_COMMUNICATION) while
+                    // LiveKit WebRTC already owns the hardware voice communication capture & AEC/NS.
                     val buf = ByteArray(1600) // 50ms of 16kHz PCM16
-                    if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
-                        audioRecord.startRecording()
-                        while (running.get()) {
-                            val n = audioRecord.read(buf, 0, buf.size)
-                            if (n > 0) {
-                                fos.write(buf, 0, n)
-                                totalPcmBytes += n
-                                recordedDurationMs = (totalPcmBytes * 1000L) / (sampleRate * 2L)
-                            }
-                        }
-                    } else {
-                        while (running.get()) {
-                            fos.write(buf)
-                            totalPcmBytes += buf.size
-                            recordedDurationMs = (totalPcmBytes * 1000L) / (sampleRate * 2L)
-                            Thread.sleep(50)
-                        }
+                    while (running.get()) {
+                        fos.write(buf)
+                        totalPcmBytes += buf.size
+                        recordedDurationMs = (totalPcmBytes * 1000L) / (sampleRate * 2L)
+                        Thread.sleep(50)
                     }
                 }
                 patchWavHeader(outputFile, totalPcmBytes.toInt(), sampleRate)
             } catch (_: Exception) {
-            } finally {
-                try {
-                    audioRecord?.stop()
-                } catch (_: Exception) {
-                }
-                try {
-                    audioRecord?.release()
-                } catch (_: Exception) {
-                }
             }
         }.apply {
             name = "local-wav-recorder"

@@ -650,6 +650,7 @@ class MainActivity : ComponentActivity() {
                 tenantIdState.value = tenantId
                 apiKeyIdState.value = apiKeyId
 
+                stopMediaPlayer()
                 room?.disconnect()
                 val lkRoom = LiveKit.create(applicationContext)
                 room = lkRoom
@@ -682,12 +683,12 @@ class MainActivity : ComponentActivity() {
                 audioManager.isSpeakerphoneOn = true
                 audioManager.setStreamVolume(
                     AudioManager.STREAM_VOICE_CALL,
-                    audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
+                    ((audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL) * 3) / 5).coerceAtLeast(1),
                     0,
                 )
                 audioManager.setStreamVolume(
                     AudioManager.STREAM_MUSIC,
-                    (audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * 4) / 5,
+                    ((audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * 3) / 5).coerceAtLeast(1),
                     0,
                 )
 
@@ -836,14 +837,53 @@ class MainActivity : ComponentActivity() {
                     simTargetLangState.value = newLang
                     appendLog("✓ 目标语言已切至 ${langLabel(newLang)}")
                 }
+                "agent_speaking" -> {
+                    val speaking = obj.optBoolean("speaking", false)
+                    isTtsSpeaking.value = speaking
+                    if (speaking) {
+                        freetalkStatusState.value = "回应中"
+                        lifecycleScope.launch {
+                            try {
+                                room?.localParticipant?.setMicrophoneEnabled(false)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    } else {
+                        freetalkStatusState.value = "正在听"
+                        lifecycleScope.launch {
+                            delay(350)
+                            if (!isTtsSpeaking.value && isSessionActive.value) {
+                                try {
+                                    room?.localParticipant?.setMicrophoneEnabled(true)
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                }
                 "tts_state" -> {
                     val state = obj.optString("state", "")
                     val targetDevice = obj.optString("target_device", "speaker")
                     if (state == "start") {
                         isTtsSpeaking.value = true
                         DialogueAudioRouter.routeForTargetDevice(this, targetDevice)
+                        lifecycleScope.launch {
+                            try {
+                                room?.localParticipant?.setMicrophoneEnabled(false)
+                            } catch (_: Exception) {
+                            }
+                        }
                     } else if (state == "end") {
                         isTtsSpeaking.value = false
+                        lifecycleScope.launch {
+                            delay(350)
+                            if (!isTtsSpeaking.value && isSessionActive.value) {
+                                try {
+                                    room?.localParticipant?.setMicrophoneEnabled(true)
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
                     }
                 }
                 "summary_input_ack" -> {
@@ -869,6 +909,11 @@ class MainActivity : ComponentActivity() {
             isSessionActive.value = false
             room?.disconnect()
             room = null
+            try {
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.mode = AudioManager.MODE_NORMAL
+            } catch (_: Exception) {
+            }
             val durMs = localRecorder?.stop() ?: (elapsedSecondsState.value * 1000L)
             localRecorder = null
 
@@ -1192,6 +1237,10 @@ class MainActivity : ComponentActivity() {
         if (!file.exists()) return
         stopMediaPlayer()
         try {
+            if (room == null) {
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.mode = AudioManager.MODE_NORMAL
+            }
             val mp = MediaPlayer()
             mp.setDataSource(file.absolutePath)
             mp.prepare()
